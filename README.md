@@ -1,0 +1,2 @@
+# responses-proxy
+适用于chat接口的大模型不能用于Codex的response接口

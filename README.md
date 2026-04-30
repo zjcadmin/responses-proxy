@@ -82,41 +82,13 @@ Codex 使用的 API Key 来自本地 `manager-config.json` 里的 `proxy_api_key
 - `.env`
   旧版兼容导入来源，不再是主要配置入口
 
-这些文件都已加入 `.gitignore`，适合后续上传 GitHub 时避开真实密钥。
 
-### 可提交到 GitHub 的示例文件
+### 示例文件
 
 - `manager-config.example.json`
 - `model-presets.example.json`
 - `model-config.example.json`
 - `.env.example`
-
-## 上传到 GitHub 前
-
-建议按这个顺序整理：
-
-1. 保持当前 `.gitignore` 不变，再执行 `git init` 或 `git add .`
-2. 不要把下面这些本地文件提交到仓库：
-   - `.env`
-   - `manager-config.json`
-   - `model-presets.json`
-   - `model-config.json`
-   - `debug-latest-codex-request.json`
-   - `runtime/`
-3. 如果你之前已经把真实 key 发到过任何公开位置，请先去上游平台轮换密钥
-4. 上传仓库时优先保留：
-   - `app/`
-   - `scripts/`
-   - `tests/`
-   - `docs/`
-   - `README.md`
-   - `.gitignore`
-   - `.gitattributes`
-   - `pyproject.toml`
-   - `*.example.json`
-   - `.env.example`
-
-如果你想给别人一个“开箱即用”的仓库，推荐只提交示例配置，不要提交任何真实运行态文件。
 
 ## 仍然保留的旧脚本
 

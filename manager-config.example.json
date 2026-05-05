@@ -1,0 +1,11 @@
+{
+  "manager_host": "127.0.0.1",
+  "manager_port": 8899,
+  "password_hash": "<set-on-first-run>",
+  "password_salt": "<set-on-first-run>",
+  "session_secret": "<set-on-first-run>",
+  "local_only": true,
+  "log_tail_lines": 200,
+  "runtime_dir": "runtime",
+  "proxy_api_key": "<optional-proxy-api-key>"
+}

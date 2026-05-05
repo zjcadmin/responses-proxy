@@ -1,0 +1,22 @@
+{
+  "active_preset_id": "preset_example_deepseek",
+  "presets": [
+    {
+      "id": "preset_example_deepseek",
+      "name": "DeepSeek Example",
+      "provider": "DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "chat_path": "/chat/completions",
+      "api_key": "<your-upstream-api-key>",
+      "model": "deepseek-chat",
+      "proxy_host": "127.0.0.1",
+      "proxy_port": 8800,
+      "request_timeout_seconds": 120.0,
+      "headers": {},
+      "description": "Example preset for local setup",
+      "api_key_header_name": "Authorization",
+      "api_key_prefix": "Bearer ",
+      "is_active": true
+    }
+  ]
+}

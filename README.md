@@ -139,6 +139,10 @@ Set-Location '*你的电脑存放路径*\responses-proxy'
 - 网页 API 可以启动代理
 - 启动后 `http://127.0.0.1:8800/healthz` 返回 `ok`
 - 网页 API 可以停止代理并再次拉起
+
+
+##  应用截图
+
 <img width="2525" height="1463" alt="代理大屏" src="https://github.com/user-attachments/assets/9300d6a9-2892-4bcc-891a-036b5a5fffcb" />
 <img width="2548" height="1459" alt="配置截图" src="https://github.com/user-attachments/assets/1e303322-1792-45b9-942e-6a5055d9223e" />
 <img width="2560" height="1528" alt="ccswitch" src="https://github.com/user-attachments/assets/fc47ae9e-0ddc-4e29-b8ef-d6167ef260db" />

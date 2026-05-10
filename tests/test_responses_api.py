@@ -14,6 +14,7 @@ def _make_client(handler, settings_overrides: dict[str, Any] | None = None) -> T
     transport = httpx.MockTransport(handler)
     overrides = {
         "upstream_base_url": "https://upstream.example/v1",
+        "upstream_model": "deepseek-chat",
         "upstream_api_key": "upstream-secret",
         "proxy_api_key": "proxy-secret",
         "request_timeout_seconds": 10.0,
@@ -354,6 +355,260 @@ def test_namespace_tools_are_flattened_into_compatible_function_tools() -> None:
             },
         }
     ]
+
+
+def test_tool_requests_default_to_explicit_auto_tool_choice_and_agent_hint() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-agent-hint",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    client = _make_client(handler, settings_overrides={"upstream_model": "deepseek-chat"})
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": "Read files and write a report",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert recorded["json"]["tool_choice"] == "auto"
+    assert recorded["json"]["messages"][0]["role"] == "system"
+    assert "Do not stop after saying you will run or inspect something" in recorded["json"]["messages"][0]["content"]
+    assert "<tool_call>" in recorded["json"]["messages"][0]["content"]
+    assert recorded["json"]["messages"][1:] == [{"role": "user", "content": "Read files and write a report"}]
+
+
+def test_mimo_tool_requests_use_prompt_tool_mode_instead_of_native_tools() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-mimo-prompt-tools",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "mimo-v2.5",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": '<tool_call>{"name":"shell_command","arguments":{"command":"ls -la"}}</tool_call>',
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    client = _make_client(
+        handler,
+        settings_overrides={
+            "upstream_base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+            "upstream_model": "mimo-v2.5",
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": "请查看当前目录文件列表",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "tools" not in recorded["json"]
+    assert "tool_choice" not in recorded["json"]
+    assert "Available tools:" in recorded["json"]["messages"][0]["content"]
+    assert "If the user asks in Chinese" in recorded["json"]["messages"][0]["content"]
+    assert "Never ask the user to provide the exact shell command" in recorded["json"]["messages"][0]["content"]
+    assert "appears corrupted" in recorded["json"]["messages"][0]["content"]
+    assert "Current proxy host platform:" in recorded["json"]["messages"][0]["content"]
+    assert response.json()["output"][0]["type"] == "function_call"
+
+
+def test_text_tool_call_marker_is_converted_to_response_function_call() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-text-tool",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": '<tool_call>{"name":"shell_command","arguments":{"command":"Get-ChildItem"}}</tool_call>',
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    client = _make_client(handler)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": "List files",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["output_text"] == ""
+    assert payload["output"][0]["type"] == "function_call"
+    assert payload["output"][0]["name"] == "shell_command"
+    assert json.loads(payload["output"][0]["arguments"]) == {"command": "Get-ChildItem"}
+
+
+def test_streaming_text_tool_call_marker_is_buffered_and_converted_without_leaking_marker() -> None:
+    upstream_events = [
+        {
+            "id": "chatcmpl-stream-text-tool",
+            "object": "chat.completion.chunk",
+            "created": 1_714_444_444,
+            "model": "deepseek-chat",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": '<tool_call>{"name":"shell_command",'},
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-stream-text-tool",
+            "object": "chat.completion.chunk",
+            "created": 1_714_444_444,
+            "model": "deepseek-chat",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": '"arguments":{"command":"Get-ChildItem"}}</tool_call>'},
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+    ]
+    chunks = [f"data: {json.dumps(event)}\n\n" for event in upstream_events]
+    chunks.append("data: [DONE]\n\n")
+
+    class AsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> Iterator[bytes]:
+            for chunk in chunks:
+                yield chunk.encode("utf-8")
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=AsyncStream(),
+        )
+
+    client = _make_client(handler)
+
+    with client.stream(
+        "POST",
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": "List files",
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        },
+    ) as response:
+        body = response.read().decode("utf-8")
+        events = _parse_sse_events(body)
+
+    assert response.status_code == 200
+    assert "<tool_call>" not in body
+    assert "response.output_text.delta" not in body
+    added = next(event[1] for event in events if event[0] == "response.output_item.added")
+    done = next(event[1] for event in events if event[0] == "response.output_item.done")
+    assert added["item"]["type"] == "function_call"
+    assert done["item"]["name"] == "shell_command"
+    assert json.loads(done["item"]["arguments"]) == {"command": "Get-ChildItem"}
 
 
 def test_streaming_response_is_emitted_as_sse_events() -> None:

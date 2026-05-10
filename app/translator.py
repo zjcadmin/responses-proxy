@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import base64
 import json
+import platform
+import re
 import time
 import uuid
 from typing import Any
@@ -19,6 +21,32 @@ IGNORED_HOSTED_TOOL_TYPES = {
     "code_interpreter",
     "image_generation",
 }
+
+AGENT_TOOL_USE_HINT = (
+    "You are serving an agent runtime through a Chat Completions compatibility layer. "
+    "When tools are available and the user asks you to inspect files, run commands, edit files, "
+    "read documents, or continue work after tool output, call the appropriate tool in the same turn. "
+    "Do not stop after saying you will run or inspect something. "
+    "If the upstream API does not support native tool calls, output exactly one fallback marker "
+    'like <tool_call>{"name":"tool_name","arguments":{"arg":"value"}}</tool_call> and no prose. '
+    "Only provide a final natural-language answer when the task is actually complete."
+)
+PROMPT_TOOL_USE_HINT = (
+    "You are serving an agent runtime through a Chat Completions compatibility layer. "
+    "The upstream API may ignore native tool parameters, so call tools only by outputting exactly one "
+    'fallback marker like <tool_call>{"name":"tool_name","arguments":{"arg":"value"}}</tool_call> and no prose. '
+    "If the user asks in Chinese or another non-English language, infer the intended action and still call the tool. "
+    "Never ask the user to provide the exact shell command when the intent is clear. "
+    "If the user message appears corrupted, garbled, reduced to question marks, or incomplete because of encoding, "
+    "do not ask for clarification; choose a safe inspection action such as listing the current directory. "
+    "For example, if the user asks to list/view the current directory, call shell_command with ls -la on Unix/macOS "
+    "or Get-ChildItem on Windows if that is the available shell context. "
+    "If the user asks to read a file, call a safe read command. If the user asks to write or edit files, call the "
+    "available file or shell tool with the needed action. "
+    "Do not describe what a tool is. Do not stop after saying you will run or inspect something. "
+    "Only provide a final natural-language answer when the task is actually complete."
+)
+TOOL_CALL_MARKER_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 
 class UnsupportedFeatureError(ValueError):
@@ -53,9 +81,20 @@ def prepare_chat_request(
     else:
         conversation_messages = merge_conversation_history(history, input_messages)
 
+    raw_tools = payload.get("tools")
+    compatible_tools = flatten_tools(raw_tools) if isinstance(raw_tools, list) else []
+    prompt_tool_mode = should_use_prompt_tool_mode(settings)
+
     messages: list[dict[str, Any]] = []
     if instructions:
         messages.append({"role": "system", "content": extract_text(instructions, source="instructions")})
+    if compatible_tools:
+        messages.append(
+            {
+                "role": "system",
+                "content": build_agent_tool_use_message(compatible_tools, prompt_mode=prompt_tool_mode),
+            }
+        )
     messages.extend(deepcopy(hosted_tool_messages or []))
     messages.extend(deepcopy(conversation_messages))
 
@@ -85,14 +124,18 @@ def prepare_chat_request(
     if max_output_tokens is not None:
         upstream_payload["max_tokens"] = max_output_tokens
 
-    tools = payload.get("tools")
-    if tools:
-        compatible_tools = flatten_tools(tools)
-        if compatible_tools:
-            upstream_payload["tools"] = compatible_tools
+    if compatible_tools and not prompt_tool_mode:
+        upstream_payload["tools"] = compatible_tools
 
     tool_choice = payload.get("tool_choice")
-    if tool_choice is not None and upstream_payload.get("tools"):
+    if upstream_payload.get("tools"):
+        if tool_choice is None:
+            upstream_payload["tool_choice"] = "auto"
+        else:
+            converted_tool_choice = convert_tool_choice(tool_choice)
+            if converted_tool_choice is not None:
+                upstream_payload["tool_choice"] = converted_tool_choice
+    elif tool_choice is not None:
         converted_tool_choice = convert_tool_choice(tool_choice)
         if converted_tool_choice is not None:
             upstream_payload["tool_choice"] = converted_tool_choice
@@ -104,6 +147,36 @@ def prepare_chat_request(
     return PreparedChatRequest(
         upstream_payload=upstream_payload,
         conversation_messages=conversation_messages,
+    )
+
+
+def should_use_prompt_tool_mode(settings: Settings) -> bool:
+    marker = f"{settings.upstream_base_url} {settings.upstream_model}".lower()
+    return "mimo" in marker or "xiaomimimo" in marker
+
+
+def build_agent_tool_use_message(compatible_tools: list[dict[str, Any]], *, prompt_mode: bool) -> str:
+    if not prompt_mode:
+        return AGENT_TOOL_USE_HINT
+
+    tool_lines = []
+    for tool in compatible_tools:
+        function = tool.get("function") or {}
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        parameters = function.get("parameters") or {"type": "object", "properties": {}}
+        tool_lines.append(
+            f"- {name}: parameters JSON schema: {json.dumps(parameters, ensure_ascii=False)}"
+        )
+    if not tool_lines:
+        return PROMPT_TOOL_USE_HINT
+    return (
+        PROMPT_TOOL_USE_HINT
+        + f"\nCurrent proxy host platform: {platform.system()}."
+        + "\nIf calling a shell tool on Windows, prefer PowerShell-compatible commands such as Get-ChildItem -Force."
+        + "\nAvailable tools:\n"
+        + "\n".join(tool_lines)
     )
 
 
@@ -410,6 +483,8 @@ def build_response_from_upstream(
     assistant_text = normalize_assistant_text(message.get("content"))
     reasoning_content = normalize_assistant_text(message.get("reasoning_content"))
     tool_calls = normalize_tool_calls(message.get("tool_calls"), payload=payload)
+    if not tool_calls:
+        assistant_text, tool_calls = extract_text_tool_call_markers(assistant_text, payload)
     finish_reason = choice.get("finish_reason")
     usage = convert_usage(upstream_response.get("usage"))
     response = build_response_object(
@@ -684,6 +759,48 @@ def normalize_tool_calls(value: Any, payload: dict[str, Any] | None = None) -> l
     return tool_calls
 
 
+def extract_text_tool_call_markers(text: str, payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    if not text or "<tool_call>" not in text:
+        return text, []
+
+    tool_schemas = build_tool_schema_index(payload)
+    if not tool_schemas:
+        return text, []
+
+    tool_calls: list[dict[str, Any]] = []
+    for match in TOOL_CALL_MARKER_RE.finditer(text):
+        parsed = parse_json_value(match.group(1))
+        if not isinstance(parsed, dict):
+            continue
+        name = parsed.get("name")
+        if not isinstance(name, str) or not name:
+            function = parsed.get("function")
+            if isinstance(function, dict):
+                name = function.get("name")
+        if not isinstance(name, str) or name not in tool_schemas:
+            continue
+
+        arguments = parsed.get("arguments", {})
+        if not isinstance(arguments, str):
+            arguments = stringify_value(arguments)
+        normalized_name, normalized_arguments = normalize_tool_call_output(name, arguments, tool_schemas)
+        tool_calls.append(
+            {
+                "id": str(parsed.get("id") or parsed.get("call_id") or make_id("call")),
+                "type": "function",
+                "function": {
+                    "name": normalized_name,
+                    "arguments": normalized_arguments,
+                },
+            }
+        )
+
+    if not tool_calls:
+        return text, []
+    cleaned_text = TOOL_CALL_MARKER_RE.sub("", text).strip()
+    return cleaned_text, tool_calls
+
+
 def build_tool_schema_index(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_tools = payload.get("tools")
     if not isinstance(raw_tools, list):
@@ -893,6 +1010,7 @@ class StreamToolCall:
     output_index: int
     name: str = ""
     arguments: str = ""
+    added_emitted: bool = False
 
 
 @dataclass
@@ -909,6 +1027,9 @@ class StreamAccumulator:
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     sequence_number: int = 0
+
+    def should_buffer_text(self) -> bool:
+        return bool(build_tool_schema_index(self.payload))
 
     def initial_events(self) -> list[bytes]:
         response_stub = build_response_envelope(
@@ -952,6 +1073,10 @@ class StreamAccumulator:
         if isinstance(reasoning_content, str) and reasoning_content:
             self.reasoning_chunks.append(reasoning_content)
         if isinstance(content, str) and content:
+            self.text_chunks.append(content)
+            if self.should_buffer_text():
+                self.finish_reason = choice.get("finish_reason") or self.finish_reason
+                return events
             if not self.text_started:
                 self.text_started = True
                 events.append(
@@ -974,7 +1099,6 @@ class StreamAccumulator:
                         },
                     )
                 )
-            self.text_chunks.append(content)
             events.append(
                 self.emit(
                     "response.output_text.delta",
@@ -1002,6 +1126,7 @@ class StreamAccumulator:
                         id=raw_tool_call.get("id") or make_id("call"),
                         output_index=tool_output_index,
                         name=function.get("name", ""),
+                        added_emitted=True,
                     )
                     self.tool_calls[index] = tool_call
                     self.tool_call_order.append(index)
@@ -1041,6 +1166,7 @@ class StreamAccumulator:
         reasoning_content = "".join(self.reasoning_chunks)
         tool_schemas = build_tool_schema_index(self.payload)
         normalized_tool_calls = []
+        tool_added_emitted: list[bool] = []
         for index in self.tool_call_order:
             raw_tool_call = self.tool_calls[index]
             normalized_name, normalized_arguments = normalize_tool_call_output(
@@ -1058,10 +1184,36 @@ class StreamAccumulator:
                     },
                 }
             )
+            tool_added_emitted.append(raw_tool_call.added_emitted)
+
+        if not normalized_tool_calls:
+            assistant_text, normalized_tool_calls = extract_text_tool_call_markers(assistant_text, self.payload)
+            tool_added_emitted = [False for _ in normalized_tool_calls]
 
         has_message_item = bool(assistant_text or not normalized_tool_calls)
         if has_message_item:
             stream_message_item = self.build_stream_message_item(status="completed", text=assistant_text)
+            if not self.text_started:
+                events.append(
+                    self.emit(
+                        "response.output_item.added",
+                        {
+                            "output_index": 0,
+                            "item": self.build_stream_message_item(status="in_progress", text=""),
+                        },
+                    )
+                )
+                events.append(
+                    self.emit(
+                        "response.content_part.added",
+                        {
+                            "item_id": self.message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "part": self.build_stream_text_part(""),
+                        },
+                    )
+                )
             events.append(
                 self.emit(
                     "response.output_text.done",
@@ -1097,6 +1249,24 @@ class StreamAccumulator:
 
         for tool_index, tool_call in enumerate(normalized_tool_calls):
             output_index = tool_index + (1 if has_message_item else 0)
+            if not tool_added_emitted[tool_index]:
+                events.append(
+                    self.emit(
+                        "response.output_item.added",
+                        {
+                            "output_index": output_index,
+                            "item": self.build_stream_function_call_item(
+                                StreamToolCall(
+                                    id=tool_call["id"],
+                                    output_index=output_index,
+                                    name=tool_call["function"]["name"],
+                                    arguments="",
+                                ),
+                                status="in_progress",
+                            ),
+                        },
+                    )
+                )
             events.append(
                 self.emit(
                     "response.function_call_arguments.done",

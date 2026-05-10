@@ -76,7 +76,6 @@ http://127.0.0.1:8800/v1
 
 - [多平台部署文档 / Deployment Guide](docs/deploy.md)
 - [桌面应用打包文档 / Desktop App Packaging](docs/desktop-app.md)
-- [GitHub 发布清单 / GitHub Publishing Checklist](docs/github.md)
 
 ### 配置文件
 

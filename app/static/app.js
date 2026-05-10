@@ -15,7 +15,17 @@ const state = {
   status: null,
   presets: [],
   settings: null,
-  settingsForm: { proxy_api_key: "" },
+  settingsForm: {
+    manager_host: "127.0.0.1",
+    manager_port: 8899,
+    proxy_api_key: "",
+    web_search_backend: "disabled",
+    web_search_searxng_url: "",
+    web_search_tavily_api_key: "",
+    web_search_max_results: 5,
+    file_search_paths: "",
+    file_search_max_results: 5,
+  },
   settingsDirty: false,
   logs: { events: [], stdout: [], stderr: [] },
   pollingHandle: null,
@@ -80,6 +90,11 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function option(value, label, selectedValue) {
+  const selected = String(value) === String(selectedValue) ? " selected" : "";
+  return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(label)}</option>`;
 }
 
 function prettyJson(value) {
@@ -244,15 +259,7 @@ function mountDashboardShell() {
       <aside class="dashboard-sidebar" id="sidebar-region"></aside>
       <main class="dashboard-main">
         <section id="header-region"></section>
-        <section id="stats-region"></section>
-        <div class="dashboard-grid dashboard-grid-top">
-          <section id="presets-region"></section>
-          <section id="settings-region"></section>
-        </div>
-        <div class="dashboard-grid dashboard-grid-bottom">
-          <section id="preview-region"></section>
-          <section id="logs-region"></section>
-        </div>
+        <section id="content-region" class="content-region"></section>
       </main>
     </div>
   `;
@@ -270,13 +277,9 @@ function syncDashboard() {
 
   setRegion("sidebar-region", renderSidebar(activePreset));
   setRegion("header-region", renderHeader(proxy, activePreset, manager));
-  setRegion("stats-region", renderStats(proxy, activePreset));
-  setRegion("presets-region", renderPresetSection(activePreset));
-  if (!state.settingsDirty) {
-    setRegion("settings-region", renderSettingsSection(activePreset, proxy));
+  if (!(state.currentSection === "settings" && state.settingsDirty)) {
+    setRegion("content-region", renderMainContent(proxy, activePreset));
   }
-  setRegion("preview-region", renderPreviewSection(activePreset));
-  setRegion("logs-region", renderLogsSection());
 }
 
 function renderSidebar(activePreset) {
@@ -341,6 +344,39 @@ function renderHeader(proxy, activePreset, manager) {
   `;
 }
 
+function renderMainContent(proxy, activePreset) {
+  switch (state.currentSection) {
+    case "presets":
+      return `<div class="page-stack" data-page="presets">${renderPresetSection(activePreset)}</div>`;
+    case "settings":
+      return `<div class="page-stack" data-page="settings">${renderSettingsSection(activePreset, proxy)}</div>`;
+    case "preview":
+      return `<div class="page-stack" data-page="preview">${renderPreviewSection(activePreset)}</div>`;
+    case "logs":
+      return `<div class="page-stack" data-page="logs">${renderLogsSection()}</div>`;
+    case "overview":
+    default:
+      return renderOverviewPage(proxy, activePreset);
+  }
+}
+
+function renderOverviewPage(proxy, activePreset) {
+  return `
+    <div class="page-stack" data-page="overview">
+      ${renderStats(proxy, activePreset)}
+      <div class="overview-layout">
+        <div class="overview-primary">
+          ${renderPresetSection(activePreset, { compact: true })}
+        </div>
+        <aside class="overview-side">
+          ${renderQuickActionsSection(proxy, activePreset)}
+          ${renderHostedToolsSummary()}
+        </aside>
+      </div>
+    </div>
+  `;
+}
+
 function renderStats(proxy, activePreset) {
   const cards = [
     {
@@ -393,7 +429,63 @@ function renderStats(proxy, activePreset) {
   `;
 }
 
-function renderPresetSection(activePreset) {
+function renderQuickActionsSection(proxy, activePreset) {
+  return `
+    <section class="panel-card quick-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">代理控制</div>
+          <div class="card-subtitle">启动前会自动同步当前预设和环境配置。</div>
+        </div>
+      </div>
+      <div class="action-stack">
+        <button class="button button-primary" data-action="start-proxy" ${buttonDisabled(getProxy()?.running || isBusy() || !activePreset)}>启动代理</button>
+        <button class="button button-secondary" data-action="restart-proxy" ${buttonDisabled(isBusy() || !activePreset)}>重启代理</button>
+        <button class="button button-danger button-soft" data-action="stop-proxy" ${buttonDisabled(!getProxy()?.running || isBusy())}>停止代理</button>
+        <button class="button button-ghost" data-action="copy-base-url" ${buttonDisabled(!proxy?.base_url)}>复制 Base URL</button>
+      </div>
+      <div class="mini-stat single">
+        <span>当前访问地址</span>
+        <strong>${escapeHtml(currentBaseUrl())}</strong>
+        <small>${escapeHtml(proxyStatusLabel(proxy))}</small>
+      </div>
+    </section>
+  `;
+}
+
+function renderHostedToolsSummary() {
+  const settings = state.settings?.settings || {};
+  const filePaths = Array.isArray(settings.file_search_paths) ? settings.file_search_paths : [];
+  return `
+    <section class="panel-card quick-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Hosted Tools 本地桥接</div>
+          <div class="card-subtitle">配置项在“环境配置”页独立管理。</div>
+        </div>
+      </div>
+      <div class="capability-list">
+        <div class="capability-item">
+          <span>Web Search</span>
+          <strong>${escapeHtml(settings.web_search_backend || "disabled")}</strong>
+        </div>
+        <div class="capability-item">
+          <span>File Search</span>
+          <strong>${filePaths.length ? `${filePaths.length} 个路径` : "未配置"}</strong>
+        </div>
+        <div class="capability-item">
+          <span>Computer Use</span>
+          <strong>上下文桥接</strong>
+        </div>
+      </div>
+      <button class="button button-secondary full-width" data-action="nav-section" data-target="settings">去配置 Hosted Tools</button>
+    </section>
+  `;
+}
+
+function renderPresetSection(activePreset, options = {}) {
+  const compact = Boolean(options.compact);
+  const visiblePresets = compact ? state.presets.slice(0, 3) : state.presets;
   return `
     <section class="panel-card panel-large" id="section-presets">
       <div class="card-header">
@@ -402,6 +494,7 @@ function renderPresetSection(activePreset) {
           <div class="card-subtitle">保存多套模型配置，支持直接编辑端口、Key、Base URL 和认证头。</div>
         </div>
         <div class="card-actions">
+          ${compact ? `<button class="button button-ghost" data-action="nav-section" data-target="presets">查看全部</button>` : ""}
           <button class="button button-secondary" data-action="edit-active-preset" ${buttonDisabled(!activePreset || isBusy())}>编辑当前预设</button>
           <button class="button button-primary" data-action="new-preset" ${buttonDisabled(isBusy())}>新建预设</button>
         </div>
@@ -416,7 +509,7 @@ function renderPresetSection(activePreset) {
                 <span>同步信息</span>
                 <span>操作</span>
               </div>
-              ${state.presets.map((preset) => renderPresetRow(preset)).join("")}
+              ${visiblePresets.map((preset) => renderPresetRow(preset)).join("")}
             </div>
           `
           : `<div class="empty-box">还没有模型预设，先创建一套 DeepSeek、Mimo 或自定义服务商配置。</div>`
@@ -461,44 +554,192 @@ function renderPresetRow(preset) {
 function renderSettingsSection(activePreset, proxy) {
   const sync = state.settings?.sync || {};
   return `
-    <section class="panel-card panel-side" id="section-settings">
-      <div class="card-header">
+    <section id="section-settings" data-page="settings" class="settings-page">
+      <div class="page-heading">
         <div>
-          <div class="card-title">环境配置</div>
-          <div class="card-subtitle">这里管理 .env 中不属于单个预设的项目，保存后会同步刷新本地环境文件。</div>
+          <p class="eyebrow">Environment</p>
+          <h2>环境配置</h2>
+          <p>这些配置不属于单个模型预设，会统一写入 <code>.env</code>、<code>model-config.json</code> 和 <code>runtime/proxy-launch.json</code>。</p>
+        </div>
+        <div class="status-card compact">
+          <span>当前代理</span>
+          <strong>${escapeHtml(proxyStatusLabel(proxy))}</strong>
+          <small>${escapeHtml(currentBaseUrl())}</small>
         </div>
       </div>
 
-      <form id="settings-form" class="settings-form">
-        <label class="field">
-          <span>代理 API Key</span>
-          <input
-            class="input"
-            name="proxy_api_key"
-            value="${escapeHtml(state.settingsForm.proxy_api_key || "")}"
-            placeholder="用于 Codex 访问本地代理"
-          />
-        </label>
-        <div class="mini-grid">
-          <div class="mini-stat">
-            <span>当前代理</span>
-            <strong>${escapeHtml(proxyStatusLabel(proxy))}</strong>
-            <small>${escapeHtml(currentBaseUrl())}</small>
+      <form id="settings-form" class="settings-form settings-layout">
+        <section class="panel-card settings-card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">访问与同步</div>
+              <div class="card-subtitle">Codex 访问本地代理时使用这里的代理 Key。</div>
+            </div>
           </div>
-          <div class="mini-stat">
-            <span>当前预设</span>
-            <strong>${escapeHtml(activePreset?.name || "未激活")}</strong>
-            <small>${escapeHtml(activePreset?.model || "点击左侧新建预设")}</small>
+          <label class="field">
+            <span>代理 API Key</span>
+            <input
+              class="input"
+              name="proxy_api_key"
+              value="${escapeHtml(state.settingsForm.proxy_api_key || "")}"
+              placeholder="用于 Codex 访问本地代理"
+            />
+          </label>
+          <div class="form-grid two-cols">
+            <label class="field">
+              <span>管理台监听地址</span>
+              <input
+                class="input"
+                name="manager_host"
+                value="${escapeHtml(state.settingsForm.manager_host || "127.0.0.1")}"
+                placeholder="127.0.0.1 / 0.0.0.0"
+              />
+              <small>本机使用推荐 127.0.0.1；局域网或 NAS 访问可填 0.0.0.0。</small>
+            </label>
+            <label class="field">
+              <span>管理台端口</span>
+              <input
+                class="input"
+                name="manager_port"
+                type="number"
+                min="1"
+                max="65535"
+                value="${escapeHtml(String(state.settingsForm.manager_port || 8899))}"
+              />
+              <small>保存后需要重启管理台，新的地址才会生效。</small>
+            </label>
           </div>
-        </div>
-        <div class="settings-note">
-          <strong>同步说明</strong>
-          <p>点“激活”“启动代理”或保存这里的环境配置时，会把当前预设统一写入 <code>.env</code>、<code>model-config.json</code> 和 <code>runtime/proxy-launch.json</code>。</p>
-        </div>
-        <div class="card-actions">
-          <button class="button button-primary" type="submit" ${buttonDisabled(isBusy())}>保存环境配置</button>
-          <button class="button button-secondary" type="button" data-action="copy-base-url" ${buttonDisabled(!proxy?.base_url)}>复制 Base URL</button>
-        </div>
+          <div class="mini-grid">
+            <div class="mini-stat">
+              <span>当前预设</span>
+              <strong>${escapeHtml(activePreset?.name || "未激活")}</strong>
+              <small>${escapeHtml(activePreset?.model || "先创建并激活预设")}</small>
+            </div>
+            <div class="mini-stat">
+              <span>管理台地址</span>
+              <strong>${escapeHtml(getManager()?.host || state.settingsForm.manager_host || "127.0.0.1")}:${escapeHtml(getManager()?.port || state.settingsForm.manager_port || "8899")}</strong>
+              <small>端口变更保存后重启管理台生效</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-card settings-card settings-card-featured">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Hosted Tools 本地桥接</div>
+              <div class="card-subtitle">上游只支持 chat/completions 时，代理会先在本地检索，再把结果注入上下文。</div>
+            </div>
+          </div>
+          <div class="settings-split">
+            <div class="settings-group">
+              <h3>Web Search</h3>
+              <div class="form-grid two-cols">
+                <label class="field">
+                  <span>搜索后端</span>
+                  <select class="input" name="web_search_backend">
+                    ${option("disabled", "关闭", state.settingsForm.web_search_backend)}
+                    ${option("searxng", "SearxNG", state.settingsForm.web_search_backend)}
+                    ${option("tavily", "Tavily", state.settingsForm.web_search_backend)}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>结果数</span>
+                  <input
+                    class="input"
+                    type="number"
+                    min="1"
+                    max="10"
+                    name="web_search_max_results"
+                    value="${escapeHtml(String(state.settingsForm.web_search_max_results || 5))}"
+                  />
+                </label>
+              </div>
+              <label class="field">
+                <span>SearxNG 搜索地址</span>
+                <input
+                  class="input"
+                  name="web_search_searxng_url"
+                  value="${escapeHtml(state.settingsForm.web_search_searxng_url || "")}"
+                  placeholder="例如 http://127.0.0.1:8080/search"
+                />
+              </label>
+              <label class="field">
+                <span>Tavily API Key</span>
+                <input
+                  class="input"
+                  name="web_search_tavily_api_key"
+                  value="${escapeHtml(state.settingsForm.web_search_tavily_api_key || "")}"
+                  placeholder="使用 Tavily 时填写"
+                />
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h3>File Search</h3>
+              <label class="field">
+                <span>检索路径</span>
+                <textarea
+                  class="input"
+                  name="file_search_paths"
+                  rows="7"
+                  placeholder="每行一个本地目录或文件路径"
+                >${escapeHtml(state.settingsForm.file_search_paths || "")}</textarea>
+                <small>支持 txt、md、py、js、ts、json、yaml、html、css 等文本文件。</small>
+              </label>
+              <label class="field">
+                <span>结果数</span>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  max="20"
+                  name="file_search_max_results"
+                  value="${escapeHtml(String(state.settingsForm.file_search_max_results || 5))}"
+                />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-card settings-card">
+          <div class="settings-note">
+            <strong>生效规则</strong>
+            <p>保存后会立即刷新本地配置文件；代理配置需要点击“重启代理”进入运行进程，管理台地址或端口需要重启管理台后生效。</p>
+          </div>
+          <div class="settings-actions">
+            <button class="button button-primary" type="submit" ${buttonDisabled(isBusy())}>保存环境配置</button>
+            <button class="button button-secondary" type="button" data-action="restart-proxy" ${buttonDisabled(isBusy() || !activePreset)}>重启代理</button>
+            <button class="button button-ghost" type="button" data-action="copy-base-url" ${buttonDisabled(!proxy?.base_url)}>复制 Base URL</button>
+          </div>
+        </section>
+      </form>
+
+      <form id="password-form" class="settings-form">
+        <section class="panel-card settings-card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">修改登录密码</div>
+              <div class="card-subtitle">修改的是 Web 管理台访问密码，建议至少 8 位并妥善保存。</div>
+            </div>
+          </div>
+          <div class="form-grid two-cols">
+            <label class="field">
+              <span>当前密码</span>
+              <input class="input" name="current_password" type="password" autocomplete="current-password" required />
+            </label>
+            <label class="field">
+              <span>新密码</span>
+              <input class="input" name="new_password" type="password" autocomplete="new-password" minlength="8" required />
+            </label>
+            <label class="field">
+              <span>确认新密码</span>
+              <input class="input" name="confirm_password" type="password" autocomplete="new-password" minlength="8" required />
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="button button-secondary" type="submit" ${buttonDisabled(isBusy())}>保存新密码</button>
+          </div>
+        </section>
       </form>
     </section>
   `;
@@ -714,7 +955,18 @@ function applyPresetsPayload(presetsPayload, statusPayload = state.status) {
 function applySettingsPayload(settingsPayload) {
   state.settings = settingsPayload;
   if (!state.settingsDirty) {
-    state.settingsForm.proxy_api_key = settingsPayload?.settings?.proxy_api_key || "";
+    const settings = settingsPayload?.settings || {};
+    state.settingsForm.manager_host = settings.manager_host || "127.0.0.1";
+    state.settingsForm.manager_port = settings.manager_port || 8899;
+    state.settingsForm.proxy_api_key = settings.proxy_api_key || "";
+    state.settingsForm.web_search_backend = settings.web_search_backend || "disabled";
+    state.settingsForm.web_search_searxng_url = settings.web_search_searxng_url || "";
+    state.settingsForm.web_search_tavily_api_key = settings.web_search_tavily_api_key || "";
+    state.settingsForm.web_search_max_results = settings.web_search_max_results || 5;
+    state.settingsForm.file_search_paths = Array.isArray(settings.file_search_paths)
+      ? settings.file_search_paths.join("\n")
+      : "";
+    state.settingsForm.file_search_max_results = settings.file_search_max_results || 5;
   }
 }
 
@@ -851,6 +1103,8 @@ async function handleLogout() {
     state.status = null;
     state.presets = [];
     state.settings = null;
+    state.settingsForm.manager_host = "127.0.0.1";
+    state.settingsForm.manager_port = 8899;
     state.settingsForm.proxy_api_key = "";
     state.settingsDirty = false;
     state.activePresetId = null;
@@ -962,7 +1216,18 @@ async function handleSettingsSubmit(event) {
   }
 
   const payload = {
+    manager_host: form.manager_host.value.trim(),
+    manager_port: Number(form.manager_port.value || 8899),
     proxy_api_key: form.proxy_api_key.value.trim(),
+    web_search_backend: form.web_search_backend.value.trim(),
+    web_search_searxng_url: form.web_search_searxng_url.value.trim(),
+    web_search_tavily_api_key: form.web_search_tavily_api_key.value.trim(),
+    web_search_max_results: Number(form.web_search_max_results.value || 5),
+    file_search_paths: form.file_search_paths.value
+      .split(/\r?\n|;/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+    file_search_max_results: Number(form.file_search_max_results.value || 5),
   };
 
   state.settingsDirty = true;
@@ -979,6 +1244,38 @@ async function handleSettingsSubmit(event) {
       return state.status;
     },
     { refreshAll: true }
+  );
+}
+
+async function handlePasswordSubmit(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const payload = {
+    current_password: form.current_password.value.trim(),
+    new_password: form.new_password.value.trim(),
+    confirm_password: form.confirm_password.value.trim(),
+  };
+
+  if (payload.new_password !== payload.confirm_password) {
+    showToast("两次输入的新密码不一致。", "error");
+    return;
+  }
+
+  await runAction(
+    "change-password",
+    "登录密码已修改。",
+    async () => {
+      await api("/api/auth/password", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      form.reset();
+      return state.status;
+    }
   );
 }
 
@@ -1136,16 +1433,30 @@ document.addEventListener("submit", (event) => {
   if (form.id === "settings-form") {
     handleSettingsSubmit(event);
   }
+  if (form.id === "password-form") {
+    handlePasswordSubmit(event);
+  }
 });
 
 document.addEventListener("input", (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
     return;
   }
-  if (target.name === "proxy_api_key" && target.form?.id === "settings-form") {
+  if (target.form?.id === "settings-form" && Object.hasOwn(state.settingsForm, target.name)) {
     state.settingsDirty = true;
-    state.settingsForm.proxy_api_key = target.value;
+    state.settingsForm[target.name] = target.value;
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
+    return;
+  }
+  if (target.form?.id === "settings-form" && Object.hasOwn(state.settingsForm, target.name)) {
+    state.settingsDirty = true;
+    state.settingsForm[target.name] = target.value;
   }
 });
 

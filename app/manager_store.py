@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import secrets
 from threading import Lock
@@ -8,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from app.auth import generate_salt, hash_password
 from app.manager_config import (
     ManagerConfig,
     ManagerState,
@@ -30,6 +32,12 @@ MANAGED_ENV_KEYS = [
     "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME",
     "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX",
     "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS",
+    "RESPONSES_PROXY_WEB_SEARCH_BACKEND",
+    "RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL",
+    "RESPONSES_PROXY_WEB_SEARCH_TAVILY_API_KEY",
+    "RESPONSES_PROXY_WEB_SEARCH_MAX_RESULTS",
+    "RESPONSES_PROXY_FILE_SEARCH_PATHS",
+    "RESPONSES_PROXY_FILE_SEARCH_MAX_RESULTS",
 ]
 
 
@@ -130,10 +138,17 @@ class ManagerStore:
     def update_manager_config(self, **updates: Any) -> ManagerConfig:
         with self._lock:
             manager = self._read_or_initialize_manager_config()
-            updated = manager.model_copy(update=updates)
+            updated = ManagerConfig.model_validate({**manager.model_dump(mode="json"), **updates})
             self._write_json(self._manager_config_path, updated.model_dump(mode="json"))
             self._ensure_runtime_dir(updated)
             return updated
+
+    def update_password(self, new_password: str) -> ManagerConfig:
+        salt = generate_salt()
+        return self.update_manager_config(
+            password_salt=salt,
+            password_hash=hash_password(new_password, salt),
+        )
 
     def sync_active_files(self, preset_id: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -149,7 +164,7 @@ class ManagerStore:
 
             runtime_dir = resolve_runtime_dir(self._project_root, manager)
             launch_path = runtime_dir / "proxy-launch.json"
-            launch_payload = self._build_launch_payload(target_preset, manager.proxy_api_key)
+            launch_payload = self._build_launch_payload(target_preset, manager)
             env_payload = self._build_env_payload(launch_payload)
 
             self._write_env_file(env_payload)
@@ -176,7 +191,7 @@ class ManagerStore:
             )
             if active_preset is None:
                 return {
-                    "settings": {"proxy_api_key": manager.proxy_api_key},
+                    "settings": self._build_settings_payload(manager),
                     "sync": {
                         "active_preset_id": None,
                         "active_preset_name": None,
@@ -189,11 +204,11 @@ class ManagerStore:
                     },
                 }
 
-            launch_payload = self._build_launch_payload(active_preset, manager.proxy_api_key)
+            launch_payload = self._build_launch_payload(active_preset, manager)
             env_payload = self._build_env_payload(launch_payload)
             runtime_dir = resolve_runtime_dir(self._project_root, manager)
             return {
-                "settings": {"proxy_api_key": manager.proxy_api_key},
+                "settings": self._build_settings_payload(manager),
                 "sync": {
                     "active_preset_id": active_preset.id,
                     "active_preset_name": active_preset.name,
@@ -212,12 +227,10 @@ class ManagerStore:
             return ManagerConfig.model_validate(data)
 
         legacy_env = self._read_env_file(self._legacy_env_path) if self._legacy_env_path else {}
-        from app.auth import hash_password
-
         password_salt = secrets.token_urlsafe(16)
         manager = ManagerConfig(
-            manager_host="127.0.0.1",
-            manager_port=8899,
+            manager_host=os.getenv("RESPONSES_PROXY_MANAGER_HOST", "127.0.0.1"),
+            manager_port=int(os.getenv("RESPONSES_PROXY_MANAGER_PORT", "8899")),
             password_hash=hash_password(DEFAULT_MANAGER_PASSWORD, password_salt),
             password_salt=password_salt,
             session_secret=secrets.token_urlsafe(32),
@@ -280,7 +293,7 @@ class ManagerStore:
             **preset_input.model_dump(),
         )
 
-    def _build_launch_payload(self, preset: ModelPreset, proxy_api_key: str) -> dict[str, Any]:
+    def _build_launch_payload(self, preset: ModelPreset, manager: ManagerConfig) -> dict[str, Any]:
         return {
             "upstream_base_url": preset.base_url,
             "upstream_chat_path": preset.chat_path,
@@ -288,11 +301,17 @@ class ManagerStore:
             "upstream_api_key": preset.api_key,
             "proxy_host": preset.proxy_host,
             "proxy_port": preset.proxy_port,
-            "proxy_api_key": proxy_api_key,
+            "proxy_api_key": manager.proxy_api_key,
             "upstream_headers": preset.headers,
             "upstream_api_key_header_name": preset.api_key_header_name,
             "upstream_api_key_prefix": preset.api_key_prefix,
             "request_timeout_seconds": preset.request_timeout_seconds,
+            "web_search_backend": manager.web_search_backend,
+            "web_search_searxng_url": manager.web_search_searxng_url,
+            "web_search_tavily_api_key": manager.web_search_tavily_api_key,
+            "web_search_max_results": manager.web_search_max_results,
+            "file_search_paths": manager.file_search_paths,
+            "file_search_max_results": manager.file_search_max_results,
         }
 
     def _build_env_payload(self, launch_payload: dict[str, Any]) -> dict[str, str]:
@@ -315,6 +334,39 @@ class ManagerStore:
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": str(
                 launch_payload.get("request_timeout_seconds", 120.0)
             ),
+            "RESPONSES_PROXY_WEB_SEARCH_BACKEND": str(
+                launch_payload.get("web_search_backend", "disabled")
+            ),
+            "RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL": str(
+                launch_payload.get("web_search_searxng_url", "")
+            ),
+            "RESPONSES_PROXY_WEB_SEARCH_TAVILY_API_KEY": str(
+                launch_payload.get("web_search_tavily_api_key", "") or ""
+            ),
+            "RESPONSES_PROXY_WEB_SEARCH_MAX_RESULTS": str(
+                launch_payload.get("web_search_max_results", 5)
+            ),
+            "RESPONSES_PROXY_FILE_SEARCH_PATHS": json.dumps(
+                launch_payload.get("file_search_paths", []),
+                ensure_ascii=False,
+            ),
+            "RESPONSES_PROXY_FILE_SEARCH_MAX_RESULTS": str(
+                launch_payload.get("file_search_max_results", 5)
+            ),
+        }
+
+    @staticmethod
+    def _build_settings_payload(manager: ManagerConfig) -> dict[str, Any]:
+        return {
+            "manager_host": manager.manager_host,
+            "manager_port": manager.manager_port,
+            "proxy_api_key": manager.proxy_api_key,
+            "web_search_backend": manager.web_search_backend,
+            "web_search_searxng_url": manager.web_search_searxng_url,
+            "web_search_tavily_api_key": manager.web_search_tavily_api_key,
+            "web_search_max_results": manager.web_search_max_results,
+            "file_search_paths": manager.file_search_paths,
+            "file_search_max_results": manager.file_search_max_results,
         }
 
     def _ensure_runtime_dir(self, manager: ManagerConfig) -> None:

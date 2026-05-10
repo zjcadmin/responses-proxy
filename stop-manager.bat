@@ -2,10 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-set "PYTHON=%~dp0..\monitoring-platform\backend\.venv\Scripts\python.exe"
-if not exist "%PYTHON%" set "PYTHON=python"
-
-"%PYTHON%" ".\scripts\stop_manager.py" --config ".\manager-config.json" %*
+REM Python resolver: scripts\resolve-python.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-manager.ps1" %*
 set "EXITCODE=%ERRORLEVEL%"
 if not "%EXITCODE%"=="0" (
     echo.

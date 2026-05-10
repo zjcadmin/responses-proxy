@@ -91,6 +91,7 @@ def main() -> int:
         host=config.proxy_host,
         port=config.proxy_port,
         reload=False,
+        log_config=None,
     )
     return 0
 

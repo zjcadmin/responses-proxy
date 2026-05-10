@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import sys
@@ -13,18 +14,40 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.manager_store import DEFAULT_MANAGER_PASSWORD, ManagerStore
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Start the responses proxy manager UI.")
+    parser.add_argument(
+        "--data-dir",
+        default=os.getenv("RESPONSES_PROXY_DATA_DIR", ""),
+        help="Directory for manager-config.json, model-presets.json, model-config.json, .env, and runtime logs.",
+    )
+    return parser.parse_args()
+
+
+def resolve_data_root(data_dir: str) -> Path:
+    if not data_dir:
+        return PROJECT_ROOT
+    path = Path(data_dir)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def main() -> int:
+    args = parse_args()
+    data_root = resolve_data_root(args.data_dir)
+    data_root.mkdir(parents=True, exist_ok=True)
+    os.environ["RESPONSES_PROXY_DATA_DIR"] = str(data_root)
     os.chdir(PROJECT_ROOT)
-    manager_config_path = PROJECT_ROOT / "manager-config.json"
+
+    manager_config_path = data_root / "manager-config.json"
     first_run = not manager_config_path.exists()
 
     store = ManagerStore(
         manager_config_path=manager_config_path,
-        presets_path=PROJECT_ROOT / "model-presets.json",
-        runtime_dir=PROJECT_ROOT / "runtime",
-        legacy_env_path=PROJECT_ROOT / ".env",
-        legacy_model_config_path=PROJECT_ROOT / "model-config.json",
-        project_root=PROJECT_ROOT,
+        presets_path=data_root / "model-presets.json",
+        runtime_dir=data_root / "runtime",
+        legacy_env_path=data_root / ".env",
+        legacy_model_config_path=data_root / "model-config.json",
+        project_root=data_root,
     )
     state = store.load_state()
 
@@ -38,6 +61,7 @@ def main() -> int:
         host=state.manager.manager_host,
         port=state.manager.manager_port,
         reload=False,
+        log_config=None,
     )
     return 0
 

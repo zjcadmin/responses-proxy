@@ -7,5 +7,11 @@
   "local_only": true,
   "log_tail_lines": 200,
   "runtime_dir": "runtime",
-  "proxy_api_key": "<optional-proxy-api-key>"
+  "proxy_api_key": "<optional-proxy-api-key>",
+  "web_search_backend": "disabled",
+  "web_search_searxng_url": "",
+  "web_search_tavily_api_key": "",
+  "web_search_max_results": 5,
+  "file_search_paths": [],
+  "file_search_max_results": 5
 }

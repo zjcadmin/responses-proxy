@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import time
 from typing import Any
+
+import psutil
 
 from app.manager_config import ModelPreset
 
@@ -24,10 +25,17 @@ class ProcessStatus:
 
 
 class ProcessManager:
-    def __init__(self, project_root: Path, python_executable: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        python_executable: Path,
+        runtime_dir: Path | None = None,
+        proxy_command: list[str] | None = None,
+    ) -> None:
         self.project_root = project_root
         self.python_executable = python_executable
-        self.runtime_dir = project_root / "runtime"
+        self.proxy_command = proxy_command
+        self.runtime_dir = runtime_dir or (project_root / "runtime")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.pid_path = self.runtime_dir / "proxy.pid"
         self.launch_path = self.runtime_dir / "proxy-launch.json"
@@ -77,7 +85,7 @@ class ProcessManager:
         stderr_handle = self.stderr_log_path.open("a", encoding="utf-8")
         try:
             process = subprocess.Popen(
-                [str(self.python_executable), str(self.run_proxy_path), "--config", str(launch_config_path)],
+                self._build_proxy_command(launch_config_path),
                 cwd=self.project_root,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
@@ -158,64 +166,43 @@ class ProcessManager:
             sock.close()
 
     def find_listening_pids(self, port: int) -> list[int]:
-        completed = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            check=True,
-        )
         pids: list[int] = []
-        for raw_line in completed.stdout.splitlines():
-            line = raw_line.strip()
-            if not line:
+        for connection in psutil.net_connections(kind="tcp"):
+            if connection.status != psutil.CONN_LISTEN:
                 continue
-            parts = line.split()
-            if len(parts) < 5 or parts[0].upper() != "TCP":
+            if self._connection_port(connection.laddr) != port or connection.pid is None:
                 continue
-            local_endpoint = parts[1]
-            remote_endpoint = parts[2]
-            pid_text = parts[-1]
-            if self._extract_port(local_endpoint) != port or not remote_endpoint.endswith(":0"):
-                continue
-            try:
-                pid = int(pid_text)
-            except ValueError:
-                continue
+            pid = int(connection.pid)
             if pid not in pids:
                 pids.append(pid)
         return pids
 
     def is_pid_running(self, pid: int) -> bool:
-        if os.name == "nt":
-            completed = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                check=True,
-            )
-            return str(pid) in completed.stdout
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not psutil.pid_exists(pid):
             return False
-        return True
+        try:
+            process = psutil.Process(pid)
+            return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        except psutil.Error:
+            return False
 
     def _terminate_pid(self, pid: int) -> None:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                check=True,
-            )
+        try:
+            process = psutil.Process(pid)
+        except psutil.NoSuchProcess:
             return
-        os.kill(pid, 15)
+        children = process.children(recursive=True)
+        for child in children:
+            child.terminate()
+        process.terminate()
+        _, alive = psutil.wait_procs([*children, process], timeout=5)
+        for still_alive in alive:
+            still_alive.kill()
+
+    def _build_proxy_command(self, launch_config_path: Path) -> list[str]:
+        if self.proxy_command:
+            return [*self.proxy_command, "--config", str(launch_config_path)]
+        return [str(self.python_executable), str(self.run_proxy_path), "--config", str(launch_config_path)]
 
     def _wait_for_listen(self, host: str, port: int, timeout_seconds: float) -> bool:
         deadline = time.time() + timeout_seconds
@@ -241,3 +228,11 @@ class ProcessManager:
             return int(port_text)
         except ValueError:
             return None
+
+    @staticmethod
+    def _connection_port(local_address: Any) -> int | None:
+        if hasattr(local_address, "port"):
+            return int(local_address.port)
+        if isinstance(local_address, tuple) and len(local_address) >= 2:
+            return int(local_address[1])
+        return None

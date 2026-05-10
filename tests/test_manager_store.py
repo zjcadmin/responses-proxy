@@ -128,7 +128,14 @@ def test_store_syncs_active_preset_to_env_and_model_files(tmp_path: Path) -> Non
         project_root=tmp_path,
     )
     store.load_state()
-    store.update_manager_config(proxy_api_key="proxy-key-123")
+    store.update_manager_config(
+        proxy_api_key="proxy-key-123",
+        web_search_backend="searxng",
+        web_search_searxng_url="http://127.0.0.1:8080/search",
+        web_search_max_results=7,
+        file_search_paths=["docs", str(tmp_path / "knowledge.md")],
+        file_search_max_results=9,
+    )
     preset = store.save_preset(
         ModelPresetInput(
             name="DeepSeek",
@@ -158,12 +165,20 @@ def test_store_syncs_active_preset_to_env_and_model_files(tmp_path: Path) -> Non
     assert env_values["RESPONSES_PROXY_PROXY_API_KEY"] == "proxy-key-123"
     assert env_values["RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX"] == "Bearer"
     assert env_values["RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS"] == "45.0"
+    assert env_values["RESPONSES_PROXY_WEB_SEARCH_BACKEND"] == "searxng"
+    assert env_values["RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL"] == "http://127.0.0.1:8080/search"
+    assert env_values["RESPONSES_PROXY_WEB_SEARCH_MAX_RESULTS"] == "7"
+    assert json.loads(env_values["RESPONSES_PROXY_FILE_SEARCH_PATHS"]) == ["docs", str(tmp_path / "knowledge.md")]
+    assert env_values["RESPONSES_PROXY_FILE_SEARCH_MAX_RESULTS"] == "9"
 
     model_config = json.loads(model_config_path.read_text(encoding="utf-8"))
     runtime_launch = json.loads((tmp_path / "runtime" / "proxy-launch.json").read_text(encoding="utf-8"))
     assert model_config == runtime_launch
     assert model_config["proxy_port"] == 8811
     assert model_config["upstream_headers"] == {"X-Provider": "deepseek"}
+    assert model_config["web_search_backend"] == "searxng"
+    assert model_config["web_search_searxng_url"] == "http://127.0.0.1:8080/search"
+    assert model_config["file_search_paths"] == ["docs", str(tmp_path / "knowledge.md")]
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

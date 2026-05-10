@@ -14,6 +14,7 @@ IGNORED_HOSTED_TOOL_TYPES = {
     "web_search",
     "web_search_preview",
     "file_search",
+    "computer_use",
     "computer_use_preview",
     "code_interpreter",
     "image_generation",
@@ -42,6 +43,7 @@ def prepare_chat_request(
     payload: dict[str, Any],
     settings: Settings,
     conversation_history: list[dict[str, Any]] | None = None,
+    hosted_tool_messages: list[dict[str, Any]] | None = None,
 ) -> PreparedChatRequest:
     history = deepcopy(conversation_history or [])
     instructions = payload.get("instructions")
@@ -54,6 +56,7 @@ def prepare_chat_request(
     messages: list[dict[str, Any]] = []
     if instructions:
         messages.append({"role": "system", "content": extract_text(instructions, source="instructions")})
+    messages.extend(deepcopy(hosted_tool_messages or []))
     messages.extend(deepcopy(conversation_messages))
 
     if not messages:
@@ -139,6 +142,15 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
             )
             continue
 
+        if item_type == "computer_call_output":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": describe_computer_call_output(item),
+                }
+            )
+            continue
+
         if item_type == "function_call":
             tool_call_id = item.get("call_id") or item.get("id") or make_id("call")
             name = item.get("name")
@@ -172,7 +184,7 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
             upstream_role = "system" if role == "developer" else role
             message: dict[str, Any] = {
                 "role": upstream_role,
-                "content": extract_text(item.get("content"), source=f"{role} message"),
+                "content": extract_message_content(item.get("content"), source=f"{role} message"),
             }
             if role == "assistant" and item.get("tool_calls"):
                 message["tool_calls"] = item["tool_calls"]
@@ -186,6 +198,68 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
         raise UnsupportedFeatureError(f"Unsupported input item type `{item_type}`.")
 
     return messages
+
+
+def extract_message_content(value: Any, source: str) -> str | list[dict[str, Any]]:
+    if isinstance(value, list):
+        parts = [convert_content_part(part, source) for part in value]
+        if all(part["type"] == "text" for part in parts):
+            return "".join(str(part.get("text", "")) for part in parts)
+        return parts
+    return extract_text(value, source=source)
+
+
+def convert_content_part(part: Any, source: str) -> dict[str, Any]:
+    if isinstance(part, str):
+        return {"type": "text", "text": part}
+    if not isinstance(part, dict):
+        raise UnsupportedFeatureError(f"{source} contains a non-object content part.")
+    part_type = part.get("type")
+    if part_type in {"input_text", "output_text", "text"}:
+        return {"type": "text", "text": str(part.get("text", ""))}
+    if part_type == "refusal":
+        return {"type": "text", "text": str(part.get("refusal", ""))}
+    if part_type in {"input_image", "image_url"}:
+        image_url = part.get("image_url") or part.get("url")
+        if isinstance(image_url, str):
+            return {"type": "image_url", "image_url": {"url": image_url}}
+        if isinstance(image_url, dict):
+            return {"type": "image_url", "image_url": deepcopy(image_url)}
+        return {"type": "text", "text": describe_file_like_part("input_image", part)}
+    if part_type in {"input_audio", "audio"}:
+        audio = part.get("input_audio") or {
+            key: part[key]
+            for key in ("data", "format")
+            if key in part
+        }
+        if audio:
+            return {"type": "input_audio", "input_audio": deepcopy(audio)}
+        return {"type": "text", "text": describe_file_like_part("input_audio", part)}
+    if part_type in {"input_file", "file"}:
+        return {"type": "text", "text": describe_file_like_part("input_file", part)}
+    raise UnsupportedFeatureError(f"Unsupported content part type `{part_type}` in {source}.")
+
+
+def describe_file_like_part(label: str, part: dict[str, Any]) -> str:
+    fields = []
+    for key in ("filename", "file_id", "mime_type", "url"):
+        if part.get(key):
+            fields.append(f"{key}={part[key]}")
+    if part.get("file_data"):
+        fields.append("file_data=<inline>")
+    return f"[{label}: {', '.join(fields) if fields else 'metadata unavailable'}]"
+
+
+def describe_computer_call_output(item: dict[str, Any]) -> str:
+    call_id = item.get("call_id") or item.get("id") or "unknown"
+    output = item.get("output")
+    if isinstance(output, dict):
+        output_type = output.get("type")
+        if output_type in {"input_image", "image_url"}:
+            image_url = output.get("image_url") or output.get("url")
+            return f"Computer call output {call_id}: image_url={image_url}"
+        return f"Computer call output {call_id}: {stringify_value(output)}"
+    return f"Computer call output {call_id}: {stringify_value(output)}"
 
 
 def extract_text(value: Any, source: str) -> str:
@@ -492,14 +566,36 @@ def merge_conversation_history(
         overlap_length += 1
 
     if overlap_length == 0:
-        return deepcopy(input_messages)
+        return restore_reasoning_content(history, input_messages)
 
     merged_messages = [
         merge_history_message(history[index], input_messages[index])
         for index in range(overlap_length)
     ]
     merged_messages.extend(deepcopy(input_messages[overlap_length:]))
-    return merged_messages
+    return restore_reasoning_content(history, merged_messages)
+
+
+def restore_reasoning_content(
+    history: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    restored = deepcopy(messages)
+    used_history_indexes: set[int] = set()
+    for message in restored:
+        if message.get("role") != "assistant" or message.get("reasoning_content"):
+            continue
+        for index, history_message in enumerate(history):
+            if index in used_history_indexes:
+                continue
+            reasoning_content = history_message.get("reasoning_content")
+            if not reasoning_content:
+                continue
+            if messages_match_for_history(history_message, message):
+                message["reasoning_content"] = reasoning_content
+                used_history_indexes.add(index)
+                break
+    return restored
 
 
 def normalize_history_message(message: dict[str, Any]) -> dict[str, Any]:

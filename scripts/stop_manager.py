@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -34,12 +33,7 @@ def load_manager_port(config_path: Path) -> int:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("stop_manager.py currently supports Windows only.", file=sys.stderr)
-        return 1
-
     args = parse_args()
-    os.chdir(PROJECT_ROOT)
 
     config_path = Path(args.config)
     if not config_path.is_absolute():

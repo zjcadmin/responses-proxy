@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
+import time
 from typing import Any
 
 
@@ -44,3 +45,20 @@ class ConversationStore:
         with self._lock:
             record = self._items.get(response_id)
             return None if record is None else deepcopy(record.conversation)
+
+    def delete_response(self, response_id: str) -> bool:
+        with self._lock:
+            return self._items.pop(response_id, None) is not None
+
+    def cancel_response(self, response_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self._items.get(response_id)
+            if record is None:
+                return None
+            response = deepcopy(record.response)
+            if response.get("status") in {"queued", "in_progress"}:
+                response["status"] = "cancelled"
+                response["completed_at"] = int(time.time())
+                response["error"] = None
+                record.response = deepcopy(response)
+            return deepcopy(record.response)

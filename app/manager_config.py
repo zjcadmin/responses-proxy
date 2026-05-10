@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class ManagerConfig(BaseModel):
     manager_host: str = "127.0.0.1"
-    manager_port: int = 8899
+    manager_port: int = Field(default=8899, ge=1, le=65535)
     password_hash: str = ""
     password_salt: str = ""
     session_secret: str = ""
@@ -17,6 +17,12 @@ class ManagerConfig(BaseModel):
     log_tail_lines: int = 200
     runtime_dir: str = "runtime"
     proxy_api_key: str = ""
+    web_search_backend: str = "disabled"
+    web_search_searxng_url: str = ""
+    web_search_tavily_api_key: str = ""
+    web_search_max_results: int = 5
+    file_search_paths: list[str] = Field(default_factory=list)
+    file_search_max_results: int = 5
 
     @field_validator("manager_host")
     @classmethod
@@ -28,14 +34,52 @@ class ManagerConfig(BaseModel):
     def _normalize_runtime_dir(cls, value: str) -> str:
         return value.strip() or "runtime"
 
+    @field_validator("web_search_backend", "web_search_searxng_url", "web_search_tavily_api_key")
+    @classmethod
+    def _normalize_tool_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("file_search_paths", mode="before")
+    @classmethod
+    def _normalize_file_search_paths(cls, value: Any) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            value = [item for item in value.split(";") if item.strip()]
+        if not isinstance(value, list):
+            raise ValueError("file_search_paths must be a list or semicolon-separated string.")
+        return [str(item).strip() for item in value if str(item).strip()]
+
 
 class ManagerSettingsInput(BaseModel):
+    manager_host: str = "127.0.0.1"
+    manager_port: int = Field(default=8899, ge=1, le=65535)
     proxy_api_key: str = ""
+    web_search_backend: str = "disabled"
+    web_search_searxng_url: str = ""
+    web_search_tavily_api_key: str = ""
+    web_search_max_results: int = 5
+    file_search_paths: list[str] = Field(default_factory=list)
+    file_search_max_results: int = 5
 
-    @field_validator("proxy_api_key")
+    @field_validator("manager_host", "proxy_api_key", "web_search_backend", "web_search_searxng_url", "web_search_tavily_api_key")
     @classmethod
-    def _normalize_proxy_api_key(cls, value: str) -> str:
-        return value.strip()
+    def _normalize_settings_text(cls, value: str, info: ValidationInfo) -> str:
+        stripped = value.strip()
+        if info.field_name == "manager_host" and not stripped:
+            return "127.0.0.1"
+        return stripped
+
+    @field_validator("file_search_paths", mode="before")
+    @classmethod
+    def _normalize_settings_file_search_paths(cls, value: Any) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            value = [item for item in value.split(";") if item.strip()]
+        if not isinstance(value, list):
+            raise ValueError("file_search_paths must be a list or semicolon-separated string.")
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 class ModelPresetInput(BaseModel):
@@ -122,6 +166,12 @@ def manager_config_example() -> dict[str, Any]:
         log_tail_lines=200,
         runtime_dir="runtime",
         proxy_api_key="<optional-proxy-api-key>",
+        web_search_backend="disabled",
+        web_search_searxng_url="",
+        web_search_tavily_api_key="",
+        web_search_max_results=5,
+        file_search_paths=[],
+        file_search_max_results=5,
     ).model_dump(mode="json")
 
 

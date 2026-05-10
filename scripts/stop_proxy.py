@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import load_launch_config
+from app.process_manager import ProcessManager
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,26 +48,13 @@ def parse_listening_pids(netstat_output: str, port: int) -> list[int]:
 
 
 def find_listening_pids(port: int) -> list[int]:
-    completed = subprocess.run(
-        ["netstat", "-ano", "-p", "tcp"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        check=True,
-    )
-    return parse_listening_pids(completed.stdout, port)
+    manager = ProcessManager(project_root=PROJECT_ROOT, python_executable=Path(sys.executable))
+    return manager.find_listening_pids(port)
 
 
 def stop_process(pid: int) -> None:
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        check=True,
-    )
+    manager = ProcessManager(project_root=PROJECT_ROOT, python_executable=Path(sys.executable))
+    manager._terminate_pid(pid)
 
 
 def _extract_port(endpoint: str) -> int | None:
@@ -82,12 +68,7 @@ def _extract_port(endpoint: str) -> int | None:
 
 
 def main() -> int:
-    if os.name != "nt":
-        print("stop_proxy.py currently supports Windows only.", file=sys.stderr)
-        return 1
-
     args = parse_args()
-    os.chdir(PROJECT_ROOT)
 
     config_path = Path(args.config)
     if not config_path.is_absolute():

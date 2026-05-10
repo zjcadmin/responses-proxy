@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Responses Proxy
+Comment=Local OpenAI Responses API proxy manager
+Exec=ResponsesProxy
+Terminal=false
+Type=Application
+Categories=Development;Utility;

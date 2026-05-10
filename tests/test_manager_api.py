@@ -88,12 +88,62 @@ def test_login_sets_session_cookie(client: TestClient) -> None:
     assert "manager_session=" in response.headers["set-cookie"]
 
 
+def test_password_can_be_changed_from_authenticated_session(client: TestClient) -> None:
+    client.post("/api/auth/login", json={"password": "admin123"})
+
+    response = client.put(
+        "/api/auth/password",
+        json={
+            "current_password": "admin123",
+            "new_password": "new-admin-456",
+            "confirm_password": "new-admin-456",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert client.post("/api/auth/login", json={"password": "admin123"}).status_code == 401
+    assert client.post("/api/auth/login", json={"password": "new-admin-456"}).status_code == 200
+
+
+def test_password_change_rejects_wrong_current_password(client: TestClient) -> None:
+    client.post("/api/auth/login", json={"password": "admin123"})
+
+    response = client.put(
+        "/api/auth/password",
+        json={
+            "current_password": "wrong-password",
+            "new_password": "new-admin-456",
+            "confirm_password": "new-admin-456",
+        },
+    )
+
+    assert response.status_code == 400
+
+
 def test_manager_index_serves_html(client: TestClient) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
     assert "Responses Proxy Manager" in response.text
     assert "manager-root" in response.text
+
+
+def test_manager_assets_are_cache_busted_and_expose_hosted_tool_settings(client: TestClient) -> None:
+    response = client.get("/")
+    script = client.get("/static/app.js?v=20260509-password-desktop-ui")
+
+    assert response.status_code == 200
+    assert "/static/styles.css?v=20260509-password-desktop-ui" in response.text
+    assert "/static/app.js?v=20260509-password-desktop-ui" in response.text
+    assert script.status_code == 200
+    assert 'data-page="settings"' in script.text
+    assert "manager_port" in script.text
+    assert "管理台端口" in script.text
+    assert "修改登录密码" in script.text
+    assert "web_search_backend" in script.text
+    assert "file_search_paths" in script.text
+    assert "Hosted Tools 本地桥接" in script.text
 
 
 def test_protected_status_requires_login(client: TestClient) -> None:
@@ -145,11 +195,56 @@ def test_settings_endpoint_updates_proxy_api_key_and_sync_preview(client: TestCl
     preset_id = presets[0]["id"]
     client.post(f"/api/presets/{preset_id}/activate")
 
-    response = client.put("/api/settings", json={"proxy_api_key": "proxy-key-updated"})
+    response = client.put(
+        "/api/settings",
+        json={
+            "proxy_api_key": "proxy-key-updated",
+            "manager_host": "127.0.0.1",
+            "manager_port": 8898,
+            "web_search_backend": "searxng",
+            "web_search_searxng_url": "http://127.0.0.1:8080/search",
+            "web_search_max_results": 6,
+            "file_search_paths": ["docs", "notes.md"],
+            "file_search_max_results": 8,
+        },
+    )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["settings"]["proxy_api_key"] == "proxy-key-updated"
+    assert payload["settings"]["manager_host"] == "127.0.0.1"
+    assert payload["settings"]["manager_port"] == 8898
+    assert payload["settings"]["web_search_backend"] == "searxng"
+    assert payload["settings"]["web_search_searxng_url"] == "http://127.0.0.1:8080/search"
+    assert payload["settings"]["file_search_paths"] == ["docs", "notes.md"]
     assert "RESPONSES_PROXY_PROXY_API_KEY=proxy-key-updated" in payload["sync"]["env_preview"]
+    assert "RESPONSES_PROXY_WEB_SEARCH_BACKEND=searxng" in payload["sync"]["env_preview"]
+    assert '"web_search_backend": "searxng"' in payload["sync"]["model_config_preview"]
+    assert '"file_search_paths": [' in payload["sync"]["model_config_preview"]
     env_values = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "RESPONSES_PROXY_PROXY_API_KEY=proxy-key-updated" in env_values
+    assert "RESPONSES_PROXY_WEB_SEARCH_BACKEND=searxng" in env_values
+    model_config = json.loads((tmp_path / "model-config.json").read_text(encoding="utf-8"))
+    assert model_config["web_search_backend"] == "searxng"
+    assert model_config["file_search_paths"] == ["docs", "notes.md"]
+    manager_config = json.loads((tmp_path / "manager-config.json").read_text(encoding="utf-8"))
+    assert manager_config["manager_port"] == 8898
+
+
+def test_settings_endpoint_rejects_invalid_manager_port(client: TestClient) -> None:
+    client.post("/api/auth/login", json={"password": "admin123"})
+
+    response = client.put(
+        "/api/settings",
+        json={
+            "proxy_api_key": "proxy-key",
+            "manager_host": "127.0.0.1",
+            "manager_port": 70000,
+            "web_search_backend": "disabled",
+            "web_search_max_results": 5,
+            "file_search_paths": [],
+            "file_search_max_results": 5,
+        },
+    )
+
+    assert response.status_code == 422

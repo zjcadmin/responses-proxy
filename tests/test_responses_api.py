@@ -921,6 +921,472 @@ def test_previous_response_id_reuses_conversation_history() -> None:
     ]
 
 
+def test_response_can_be_retrieved_cancelled_and_deleted() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-state-1",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Stored"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
+                },
+            },
+        )
+
+    client = _make_client(handler)
+
+    created = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={"model": "gpt-5-codex", "input": "Store this"},
+    )
+    response_id = created.json()["id"]
+
+    retrieved = client.get(f"/v1/responses/{response_id}", headers={"Authorization": "Bearer proxy-secret"})
+    cancelled = client.post(f"/v1/responses/{response_id}/cancel", headers={"Authorization": "Bearer proxy-secret"})
+    deleted = client.delete(f"/v1/responses/{response_id}", headers={"Authorization": "Bearer proxy-secret"})
+    missing = client.get(f"/v1/responses/{response_id}", headers={"Authorization": "Bearer proxy-secret"})
+
+    assert retrieved.status_code == 200
+    assert retrieved.json()["output_text"] == "Stored"
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "completed"
+    assert deleted.status_code == 200
+    assert deleted.json() == {"id": response_id, "object": "response", "deleted": True}
+    assert missing.status_code == 404
+
+
+def test_multimodal_image_input_is_forwarded_as_chat_content_part() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-image-1",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Image received"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                },
+            },
+        )
+
+    client = _make_client(handler)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe this image."},
+                        {"type": "input_image", "image_url": "https://example.test/cat.png"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert recorded["json"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image."},
+                {"type": "image_url", "image_url": {"url": "https://example.test/cat.png"}},
+            ],
+        }
+    ]
+
+
+def test_file_search_injects_local_file_matches(tmp_path: Any) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "guide.md").write_text("Alpha proxy supports local file search.\nSecond line.", encoding="utf-8")
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-file-search",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Found it"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                },
+            },
+        )
+
+    client = _make_client(handler, {"file_search_paths": [str(docs_dir)]})
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={"model": "gpt-5-codex", "input": "Alpha proxy", "tools": [{"type": "file_search"}]},
+    )
+
+    assert response.status_code == 200
+    assert recorded["json"]["messages"][0]["role"] == "system"
+    assert "Local file search results" in recorded["json"]["messages"][0]["content"]
+    assert "guide.md" in recorded["json"]["messages"][0]["content"]
+
+
+def test_web_search_injects_searxng_results() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "search.example":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "Proxy docs",
+                            "url": "https://example.test/proxy",
+                            "content": "Responses proxy web search result.",
+                        }
+                    ]
+                },
+            )
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-web-search",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Search context used"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    client = _make_client(
+        handler,
+        {
+            "web_search_backend": "searxng",
+            "web_search_searxng_url": "https://search.example/search",
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={"model": "gpt-5-codex", "input": "Responses proxy", "tools": [{"type": "web_search"}]},
+    )
+
+    assert response.status_code == 200
+    assert recorded["json"]["messages"][0]["role"] == "system"
+    assert "Local web search results" in recorded["json"]["messages"][0]["content"]
+    assert "https://example.test/proxy" in recorded["json"]["messages"][0]["content"]
+
+
+def test_web_search_uses_last_user_message_as_query() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "search.example":
+            recorded["search_query"] = request.url.params.get("q")
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "User query result",
+                            "url": "https://example.test/user-query",
+                            "content": "Only the final user request should be searched.",
+                        }
+                    ]
+                },
+            )
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-web-search-query",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Search context used"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    client = _make_client(
+        handler,
+        {
+            "web_search_backend": "searxng",
+            "web_search_searxng_url": "https://search.example/search",
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": "<permissions instructions>Do not search this internal context.</permissions instructions>",
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "What is Responses Proxy?"}],
+                },
+            ],
+            "tools": [{"type": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert recorded["search_query"] == "What is Responses Proxy?"
+    assert "<permissions instructions>" not in recorded["json"]["messages"][0]["content"]
+
+
+def test_web_search_429_degrades_without_failing_response() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "search.example":
+            return httpx.Response(429, json={"error": "too many requests"})
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-web-search-rate-limited",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Answered without search"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    client = _make_client(
+        handler,
+        {
+            "web_search_backend": "searxng",
+            "web_search_searxng_url": "https://search.example/search",
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={"model": "gpt-5-codex", "input": "Responses proxy", "tools": [{"type": "web_search"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output_text"] == "Answered without search"
+    assert "Search backend unavailable" in recorded["json"]["messages"][0]["content"]
+    assert "HTTP 429" in recorded["json"]["messages"][0]["content"]
+
+
+def test_web_search_falls_back_to_searxng_html_results() -> None:
+    recorded: dict[str, Any] = {}
+    search_requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "search.example":
+            search_requests.append(
+                {
+                    "query": request.url.params.get("q"),
+                    "format": request.url.params.get("format"),
+                    "accept": request.headers.get("accept"),
+                    "user_agent": request.headers.get("user-agent"),
+                }
+            )
+            if request.url.params.get("format") == "json":
+                return httpx.Response(429, json={"error": "too many requests"})
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                text="""
+                <html>
+                  <body>
+                    <article class="result">
+                      <h3><a href="https://weather.example/xining">西宁天气预报</a></h3>
+                      <p class="content">西宁今日多云，气温 8 到 21 摄氏度。</p>
+                    </article>
+                  </body>
+                </html>
+                """,
+            )
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-web-search-html",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Used HTML fallback"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    client = _make_client(
+        handler,
+        {
+            "web_search_backend": "searxng",
+            "web_search_searxng_url": "https://search.example/search",
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={"model": "gpt-5-codex", "input": "西宁天气", "tools": [{"type": "web_search"}]},
+    )
+
+    assert response.status_code == 200
+    assert search_requests[0]["format"] == "json"
+    assert search_requests[1]["format"] is None
+    assert "Mozilla/5.0" in search_requests[1]["user_agent"]
+    assert "text/html" in search_requests[1]["accept"]
+    assert "西宁天气预报" in recorded["json"]["messages"][0]["content"]
+    assert "https://weather.example/xining" in recorded["json"]["messages"][0]["content"]
+    assert "8 到 21 摄氏度" in recorded["json"]["messages"][0]["content"]
+
+
+def test_computer_call_output_is_accepted_as_context() -> None:
+    recorded: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded["json"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-computer-output",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Observed"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                },
+            },
+        )
+
+    client = _make_client(handler)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "message", "role": "user", "content": "Inspect the screen."},
+                {
+                    "type": "computer_call_output",
+                    "call_id": "cu_1",
+                    "output": {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                },
+            ],
+            "tools": [{"type": "computer_use"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert recorded["json"]["messages"][0]["role"] == "system"
+    assert "Local computer use context" in recorded["json"]["messages"][0]["content"]
+    assert recorded["json"]["messages"][2] == {
+        "role": "user",
+        "content": "Computer call output cu_1: image_url=data:image/png;base64,AAAA",
+    }
+
+
 def test_prompt_cache_key_reuses_augmented_history_with_reasoning_content() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -1021,6 +1487,129 @@ def test_prompt_cache_key_reuses_augmented_history_with_reasoning_content() -> N
             "reasoning_content": "hidden reasoning",
         },
         {"role": "user", "content": "What did I just say?"},
+    ]
+
+
+def test_prompt_cache_key_restores_reasoning_content_when_developer_message_precedes_history() -> None:
+    requests: list[dict[str, Any]] = []
+
+    responses = iter(
+        [
+            {
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1_714_444_444,
+                "model": "deepseek-reasoner",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello",
+                            "reasoning_content": "hidden reasoning",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            },
+            {
+                "id": "chatcmpl-2",
+                "object": "chat.completion",
+                "created": 1_714_444_445,
+                "model": "deepseek-reasoner",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Weather response"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 4,
+                    "total_tokens": 24,
+                },
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read().decode("utf-8"))
+        requests.append(payload)
+        second_request = len(requests) == 2
+        if second_request:
+            assistant_messages = [message for message in payload["messages"] if message["role"] == "assistant"]
+            if not assistant_messages or assistant_messages[0].get("reasoning_content") != "hidden reasoning":
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": "The `reasoning_content` in the thinking mode must be passed back to the API.",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+        return httpx.Response(200, json=next(responses))
+
+    client = _make_client(handler)
+
+    first = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "prompt_cache_key": "thread-1",
+            "input": "Hi",
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "gpt-5-codex",
+            "prompt_cache_key": "thread-1",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Use web search when needed."}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Hi"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "查一下今天的天气"}],
+                },
+            ],
+        },
+    )
+
+    assert second.status_code == 200
+    assert requests[1]["messages"] == [
+        {"role": "system", "content": "Use web search when needed."},
+        {"role": "user", "content": "Hi"},
+        {
+            "role": "assistant",
+            "content": "Hello",
+            "reasoning_content": "hidden reasoning",
+        },
+        {"role": "user", "content": "查一下今天的天气"},
     ]
 
 

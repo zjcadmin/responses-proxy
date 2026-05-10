@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     upstream_api_key_header_name: str = "Authorization"
     upstream_api_key_prefix: str = "Bearer "
     request_timeout_seconds: float = 120.0
+    web_search_backend: str = "disabled"
+    web_search_searxng_url: str = ""
+    web_search_tavily_api_key: str | None = None
+    web_search_max_results: int = 5
+    file_search_paths: list[str] = Field(default_factory=list)
+    file_search_max_results: int = 5
 
     model_config = SettingsConfigDict(
         env_prefix="RESPONSES_PROXY_",
@@ -50,6 +56,34 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_header_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("web_search_backend", "web_search_searxng_url")
+    @classmethod
+    def _normalize_search_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("web_search_tavily_api_key")
+    @classmethod
+    def _normalize_optional_search_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("file_search_paths", mode="before")
+    @classmethod
+    def _parse_file_search_paths(cls, value: Any) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = [item for item in value.split(";") if item.strip()]
+            value = parsed
+        if not isinstance(value, list):
+            raise ValueError("file_search_paths must be a list or semicolon-separated string.")
+        return [str(item).strip() for item in value if str(item).strip()]
 
     @field_validator("upstream_headers", mode="before")
     @classmethod
@@ -82,6 +116,12 @@ class LaunchConfig(BaseModel):
     upstream_api_key_header_name: str = "Authorization"
     upstream_api_key_prefix: str = "Bearer "
     request_timeout_seconds: float = 120.0
+    web_search_backend: str = "disabled"
+    web_search_searxng_url: str = ""
+    web_search_tavily_api_key: str | None = None
+    web_search_max_results: int = 5
+    file_search_paths: list[str] = Field(default_factory=list)
+    file_search_max_results: int = 5
 
     @field_validator("upstream_base_url")
     @classmethod
@@ -117,6 +157,34 @@ class LaunchConfig(BaseModel):
     def _normalize_launch_header_text(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("web_search_backend", "web_search_searxng_url")
+    @classmethod
+    def _normalize_launch_search_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("web_search_tavily_api_key")
+    @classmethod
+    def _normalize_launch_optional_search_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("file_search_paths", mode="before")
+    @classmethod
+    def _parse_launch_file_search_paths(cls, value: Any) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = [item for item in value.split(";") if item.strip()]
+            value = parsed
+        if not isinstance(value, list):
+            raise ValueError("file_search_paths must be a list or semicolon-separated string.")
+        return [str(item).strip() for item in value if str(item).strip()]
+
     def to_env(self) -> dict[str, str]:
         return {
             "RESPONSES_PROXY_UPSTREAM_BASE_URL": self.upstream_base_url,
@@ -128,6 +196,12 @@ class LaunchConfig(BaseModel):
             "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME": self.upstream_api_key_header_name,
             "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX": self.upstream_api_key_prefix,
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": str(self.request_timeout_seconds),
+            "RESPONSES_PROXY_WEB_SEARCH_BACKEND": self.web_search_backend,
+            "RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL": self.web_search_searxng_url,
+            "RESPONSES_PROXY_WEB_SEARCH_TAVILY_API_KEY": self.web_search_tavily_api_key or "",
+            "RESPONSES_PROXY_WEB_SEARCH_MAX_RESULTS": str(self.web_search_max_results),
+            "RESPONSES_PROXY_FILE_SEARCH_PATHS": json.dumps(self.file_search_paths, ensure_ascii=False),
+            "RESPONSES_PROXY_FILE_SEARCH_MAX_RESULTS": str(self.file_search_max_results),
         }
 
 
@@ -153,6 +227,12 @@ def load_synced_model_config_defaults(path: str | Path) -> dict[str, Any]:
         "upstream_api_key_header_name",
         "upstream_api_key_prefix",
         "request_timeout_seconds",
+        "web_search_backend",
+        "web_search_searxng_url",
+        "web_search_tavily_api_key",
+        "web_search_max_results",
+        "file_search_paths",
+        "file_search_max_results",
     ):
         if key in data:
             mapped[key] = data[key]

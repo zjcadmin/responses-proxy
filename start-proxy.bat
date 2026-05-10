@@ -2,14 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-echo Starting raw proxy directly.
-echo For the full visual manager, use start-manager.bat.
-echo.
-
-set "PYTHON=%~dp0..\monitoring-platform\backend\.venv\Scripts\python.exe"
-if not exist "%PYTHON%" set "PYTHON=python"
-
-"%PYTHON%" ".\scripts\run_proxy.py" --config ".\model-config.json" %*
+REM Python resolver: scripts\resolve-python.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-proxy.ps1" %*
 set "EXITCODE=%ERRORLEVEL%"
 if not "%EXITCODE%"=="0" (
     echo.

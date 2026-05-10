@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.config import Settings, load_settings
+from app.hosted_tools import build_hosted_tool_context_messages
 from app.store import ConversationStore
 from app.translator import (
     PreparedChatRequest,
@@ -58,9 +59,17 @@ def create_app(
             return conversation_history
 
         try:
-            prepared = prepare_chat_request(payload, settings, conversation_history)
+            hosted_tool_messages = await build_hosted_tool_context_messages(payload, settings, transport)
+            prepared = prepare_chat_request(
+                payload,
+                settings,
+                conversation_history,
+                hosted_tool_messages=hosted_tool_messages,
+            )
         except UnsupportedFeatureError as exc:
             return error_response(400, str(exc))
+        except httpx.HTTPError as exc:
+            return error_response(502, f"Hosted tool bridge failed: {exc}", error_type="upstream_error")
 
         upstream_token = settings.upstream_api_key or bearer_token
         if not upstream_token:
@@ -120,25 +129,42 @@ def create_app(
         return JSONResponse(response)
 
     @app.get("/v1/responses/{response_id}")
-    async def get_response(response_id: str) -> JSONResponse:
-        return error_response(
-            501,
-            f"`GET /v1/responses/{response_id}` is not implemented in this proxy.",
-        )
+    async def get_response(
+        response_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        authorized = authorize_proxy(settings, extract_bearer_token(authorization))
+        if authorized is not None:
+            return authorized
+        response = store.get_response(response_id)
+        if response is None:
+            return error_response(404, f"Unknown response_id `{response_id}`.")
+        return JSONResponse(response)
 
     @app.delete("/v1/responses/{response_id}")
-    async def delete_response(response_id: str) -> JSONResponse:
-        return error_response(
-            501,
-            f"`DELETE /v1/responses/{response_id}` is not implemented in this proxy.",
-        )
+    async def delete_response(
+        response_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        authorized = authorize_proxy(settings, extract_bearer_token(authorization))
+        if authorized is not None:
+            return authorized
+        if not store.delete_response(response_id):
+            return error_response(404, f"Unknown response_id `{response_id}`.")
+        return JSONResponse({"id": response_id, "object": "response", "deleted": True})
 
     @app.post("/v1/responses/{response_id}/cancel")
-    async def cancel_response(response_id: str) -> JSONResponse:
-        return error_response(
-            501,
-            f"`POST /v1/responses/{response_id}/cancel` is not implemented in this proxy.",
-        )
+    async def cancel_response(
+        response_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        authorized = authorize_proxy(settings, extract_bearer_token(authorization))
+        if authorized is not None:
+            return authorized
+        response = store.cancel_response(response_id)
+        if response is None:
+            return error_response(404, f"Unknown response_id `{response_id}`.")
+        return JSONResponse(response)
 
     return app
 

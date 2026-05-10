@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
+import app.process_manager as process_manager_module
 from app.manager_config import ModelPreset
 from app.process_manager import ProcessManager
 
@@ -50,6 +52,21 @@ def test_tail_logs_returns_latest_lines(tmp_path: Path) -> None:
     tail = manager.tail_file(manager.stdout_log_path, lines=2)
 
     assert tail == ["line2", "line3"]
+
+
+def test_find_listening_pids_uses_cross_platform_psutil(monkeypatch, tmp_path: Path) -> None:
+    manager = ProcessManager(project_root=tmp_path, python_executable=Path(sys.executable))
+
+    connections = [
+        SimpleNamespace(status=process_manager_module.psutil.CONN_LISTEN, laddr=SimpleNamespace(port=8800), pid=1111),
+        SimpleNamespace(status=process_manager_module.psutil.CONN_LISTEN, laddr=("127.0.0.1", 8800), pid=2222),
+        SimpleNamespace(status="ESTABLISHED", laddr=SimpleNamespace(port=8800), pid=3333),
+        SimpleNamespace(status=process_manager_module.psutil.CONN_LISTEN, laddr=SimpleNamespace(port=9999), pid=4444),
+        SimpleNamespace(status=process_manager_module.psutil.CONN_LISTEN, laddr=SimpleNamespace(port=8800), pid=None),
+    ]
+    monkeypatch.setattr(process_manager_module.psutil, "net_connections", lambda kind: connections)
+
+    assert manager.find_listening_pids(8800) == [1111, 2222]
 
 
 def _build_preset() -> ModelPreset:

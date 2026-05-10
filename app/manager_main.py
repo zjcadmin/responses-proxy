@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import inspect
 import sys
@@ -10,11 +11,11 @@ import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.auth import SessionStore, verify_password
 from app.config import load_settings
-from app.manager_config import ManagerSettingsInput, ManagerState, ModelPreset, ModelPresetInput
+from app.manager_config import ManagerSettingsInput, ManagerState, ModelPreset, ModelPresetInput, resolve_runtime_dir
 from app.manager_store import ManagerStore
 from app.process_manager import ProcessManager, ProcessStatus
 from app.upstream import UpstreamChatClient, UpstreamHTTPError
@@ -22,6 +23,30 @@ from app.upstream import UpstreamChatClient, UpstreamHTTPError
 
 class LoginPayload(BaseModel):
     password: str
+
+
+class PasswordChangePayload(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
+    @field_validator("current_password", "new_password", "confirm_password")
+    @classmethod
+    def _strip_password(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_new_password(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("New password must be at least 8 characters.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_confirmation(self) -> "PasswordChangePayload":
+        if self.new_password != self.confirm_password:
+            raise ValueError("Password confirmation does not match.")
+        return self
 
 
 class ProxyStartPayload(BaseModel):
@@ -36,7 +61,8 @@ def create_manager_app(
     connection_tester: Callable[[ModelPreset], Any] | None = None,
     project_root: Path | None = None,
 ) -> FastAPI:
-    resolved_project_root = project_root or Path(__file__).resolve().parents[1]
+    code_root = Path(__file__).resolve().parents[1]
+    resolved_project_root = project_root or resolve_data_root(code_root)
     manager_store = store or ManagerStore(
         manager_config_path=resolved_project_root / "manager-config.json",
         presets_path=resolved_project_root / "model-presets.json",
@@ -47,8 +73,10 @@ def create_manager_app(
     )
     state = manager_store.load_state()
     manager_process = process_manager or ProcessManager(
-        project_root=resolved_project_root,
+        project_root=code_root,
         python_executable=Path(sys.executable),
+        runtime_dir=resolve_runtime_dir(resolved_project_root, state.manager),
+        proxy_command=resolve_proxy_command(),
     )
     sessions = session_store or SessionStore()
     tester = connection_tester or _default_connection_tester
@@ -102,6 +130,15 @@ def create_manager_app(
         manager_process.record_event("Manager logout completed")
         return {"ok": True}
 
+    @app.put("/api/auth/password")
+    async def change_password(payload: PasswordChangePayload, _: str = Depends(require_session)) -> dict[str, Any]:
+        current = manager_store.load_state().manager
+        if not verify_password(payload.current_password, current.password_salt, current.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
+        manager_store.update_password(payload.new_password)
+        manager_process.record_event("Manager password changed")
+        return {"ok": True}
+
     @app.get("/api/session")
     async def session(manager_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         return {"authenticated": sessions.is_valid(manager_session)}
@@ -124,7 +161,7 @@ def create_manager_app(
 
     @app.put("/api/settings")
     async def update_settings(payload: ManagerSettingsInput, _: str = Depends(require_session)) -> dict[str, Any]:
-        manager_store.update_manager_config(proxy_api_key=payload.proxy_api_key)
+        manager_store.update_manager_config(**payload.model_dump())
         state = manager_store.load_state()
         if _maybe_get_active_preset(state) is not None:
             manager_store.sync_active_files()
@@ -214,6 +251,24 @@ def create_manager_app(
         return manager_process.read_logs(lines=lines)
 
     return app
+
+
+def resolve_data_root(code_root: Path) -> Path:
+    data_dir = os.getenv("RESPONSES_PROXY_DATA_DIR", "").strip()
+    if not data_dir:
+        return code_root
+    path = Path(data_dir)
+    return path if path.is_absolute() else code_root / path
+
+
+def resolve_proxy_command() -> list[str] | None:
+    raw = os.getenv("RESPONSES_PROXY_PROXY_COMMAND", "").strip()
+    if not raw:
+        return None
+    payload = json.loads(raw)
+    if not isinstance(payload, list) or not all(isinstance(item, str) and item for item in payload):
+        raise ValueError("RESPONSES_PROXY_PROXY_COMMAND must be a JSON array of command parts.")
+    return payload
 
 
 def _resolve_start_preset(store: ManagerStore, state: ManagerState, preset_id: str | None) -> ModelPreset:

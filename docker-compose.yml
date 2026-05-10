@@ -1,0 +1,15 @@
+services:
+  responses-proxy:
+    build: .
+    image: responses-proxy:latest
+    container_name: responses-proxy
+    restart: unless-stopped
+    environment:
+      RESPONSES_PROXY_DATA_DIR: /data
+      RESPONSES_PROXY_MANAGER_HOST: 0.0.0.0
+      RESPONSES_PROXY_MANAGER_PORT: 8899
+    ports:
+      - "8899:8899"
+      - "8800:8800"
+    volumes:
+      - ./data:/data

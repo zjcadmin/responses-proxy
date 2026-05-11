@@ -16,6 +16,7 @@
       "description": "Example preset for local setup",
       "api_key_header_name": "Authorization",
       "api_key_prefix": "Bearer ",
+      "supports_image_input": false,
       "is_active": true
     }
   ]

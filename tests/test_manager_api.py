@@ -131,11 +131,11 @@ def test_manager_index_serves_html(client: TestClient) -> None:
 
 def test_manager_assets_are_cache_busted_and_expose_hosted_tool_settings(client: TestClient) -> None:
     response = client.get("/")
-    script = client.get("/static/app.js?v=20260509-password-desktop-ui")
+    script = client.get("/static/app.js?v=20260510-vision-script")
 
     assert response.status_code == 200
-    assert "/static/styles.css?v=20260509-password-desktop-ui" in response.text
-    assert "/static/app.js?v=20260509-password-desktop-ui" in response.text
+    assert "/static/styles.css?v=20260510-vision-script" in response.text
+    assert "/static/app.js?v=20260510-vision-script" in response.text
     assert script.status_code == 200
     assert 'data-page="settings"' in script.text
     assert "manager_port" in script.text
@@ -144,6 +144,46 @@ def test_manager_assets_are_cache_busted_and_expose_hosted_tool_settings(client:
     assert "web_search_backend" in script.text
     assert "file_search_paths" in script.text
     assert "Hosted Tools 本地桥接" in script.text
+    assert "manager events" in script.text
+    assert "管理台事件" in script.text
+    assert "data-action=\"toggle-language\"" in script.text
+
+
+def test_logs_endpoint_exposes_chinese_log_labels(client: TestClient) -> None:
+    client.post("/api/auth/login", json={"password": "admin123"})
+
+    response = client.get("/api/logs")
+
+    assert response.status_code == 200
+    assert response.json()["labels"] == {
+        "events": "管理台事件",
+        "stdout": "Proxy 标准输出",
+        "stderr": "Proxy 错误输出",
+    }
+
+
+def test_manager_request_logging_writes_console_lines(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("RESPONSES_PROXY_MANAGER_REQUEST_LOGS", "1")
+    store = ManagerStore(
+        manager_config_path=tmp_path / "manager-config.json",
+        presets_path=tmp_path / "model-presets.json",
+        runtime_dir=tmp_path / "runtime",
+        project_root=tmp_path,
+    )
+    store.load_state()
+    app = create_manager_app(
+        store=store,
+        process_manager=FakeProcessManager(),
+        session_store=SessionStore(),
+        connection_tester=lambda preset: {"ok": True, "message": f"Connected to {preset.name}"},
+        project_root=tmp_path,
+    )
+    local_client = TestClient(app)
+
+    response = local_client.get("/")
+
+    assert response.status_code == 200
+    assert "manager GET / -> 200" in capsys.readouterr().out
 
 
 def test_protected_status_requires_login(client: TestClient) -> None:

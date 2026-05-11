@@ -117,6 +117,21 @@ textarea {
   line-height: 1.5;
 }
 
+.field-check {
+  align-content: center;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+}
+
+.field-check input {
+  margin-top: 2px;
+}
+
+.field-check small {
+  grid-column: 2;
+}
+
 .input,
 .textarea {
   width: 100%;
@@ -488,6 +503,12 @@ textarea {
 .topbar-time {
   font-size: 16px;
   color: #4f6e99;
+}
+
+.language-toggle {
+  min-width: 78px;
+  border-color: rgba(47, 118, 221, 0.2);
+  color: var(--blue);
 }
 
 .stats-row {

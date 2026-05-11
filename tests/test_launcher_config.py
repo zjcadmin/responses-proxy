@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 
 from app.config import load_launch_config, load_settings
+from app.config import LaunchConfig
+from scripts.run_proxy import resolved_runtime_payload
 
 
 def test_load_launch_config_reads_model_file() -> None:
@@ -49,7 +51,10 @@ def test_launch_config_can_be_mapped_to_environment_variables() -> None:
             "RESPONSES_PROXY_UPSTREAM_HEADERS": "{}",
             "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME": "Authorization",
             "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX": "Bearer ",
+            "RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT": "false",
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": "120.0",
+            "RESPONSES_PROXY_STRICT_PROTOCOL": "false",
+            "RESPONSES_PROXY_STATE_STORE_PATH": "",
             "RESPONSES_PROXY_WEB_SEARCH_BACKEND": "disabled",
             "RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL": "",
             "RESPONSES_PROXY_WEB_SEARCH_TAVILY_API_KEY": "",
@@ -73,6 +78,7 @@ def test_load_settings_reads_synced_model_config_defaults(tmp_path: Path, monkey
                 "upstream_headers": {"X-Provider": "mimo"},
                 "upstream_api_key_header_name": "Authorization",
                 "upstream_api_key_prefix": "Bearer",
+                "upstream_supports_image_input": True,
                 "request_timeout_seconds": 90.0,
                 "web_search_backend": "searxng",
                 "web_search_searxng_url": "http://127.0.0.1:8080/search",
@@ -92,12 +98,28 @@ def test_load_settings_reads_synced_model_config_defaults(tmp_path: Path, monkey
     assert settings.upstream_model == "mimo-v2.5-pro"
     assert settings.upstream_api_key == "sync-key"
     assert settings.upstream_headers == {"X-Provider": "mimo"}
+    assert settings.upstream_supports_image_input is True
     assert settings.request_timeout_seconds == 90.0
     assert settings.web_search_backend == "searxng"
     assert settings.web_search_searxng_url == "http://127.0.0.1:8080/search"
     assert settings.web_search_max_results == 6
     assert settings.file_search_paths == ["docs"]
     assert settings.file_search_max_results == 8
+
+
+def test_run_proxy_check_masks_secret_values() -> None:
+    payload = resolved_runtime_payload(
+        LaunchConfig(
+            upstream_api_key="upstream-secret-value",
+            proxy_api_key="proxy-secret-value",
+        )
+    )
+
+    serialized = json.dumps(payload)
+    assert "upstream-secret-value" not in serialized
+    assert "proxy-secret-value" not in serialized
+    assert payload["config_file_values"]["upstream_api_key"] == "upst...alue"
+    assert payload["effective_env"]["RESPONSES_PROXY_PROXY_API_KEY"] == "prox...alue"
 
 
 def _write_config_file(payload: dict[str, object]) -> Path:

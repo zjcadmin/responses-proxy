@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import inspect
 import sys
+import time
 from typing import Any, Callable
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator, model_validator
@@ -86,6 +87,23 @@ def create_manager_app(
     app.state.process_manager = manager_process
     app.state.session_store = sessions
     app.state.project_root = resolved_project_root
+
+    if os.getenv("RESPONSES_PROXY_MANAGER_REQUEST_LOGS") == "1":
+
+        @app.middleware("http")
+        async def manager_request_log_middleware(request: Request, call_next):
+            started = time.perf_counter()
+            status_code = 500
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                return response
+            finally:
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                print(
+                    f"manager {request.method} {request.url.path} -> {status_code} ({elapsed_ms} ms)",
+                    flush=True,
+                )
 
     static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.exists():
@@ -248,7 +266,15 @@ def create_manager_app(
     @app.get("/api/logs")
     async def logs(_: str = Depends(require_session)) -> dict[str, Any]:
         lines = manager_store.load_state().manager.log_tail_lines
-        return manager_process.read_logs(lines=lines)
+        payload = manager_process.read_logs(lines=lines)
+        return {
+            **payload,
+            "labels": {
+                "events": "管理台事件",
+                "stdout": "Proxy 标准输出",
+                "stderr": "Proxy 错误输出",
+            },
+        }
 
     return app
 

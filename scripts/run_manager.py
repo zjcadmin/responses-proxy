@@ -36,6 +36,7 @@ def main() -> int:
     data_root = resolve_data_root(args.data_dir)
     data_root.mkdir(parents=True, exist_ok=True)
     os.environ["RESPONSES_PROXY_DATA_DIR"] = str(data_root)
+    os.environ.setdefault("RESPONSES_PROXY_MANAGER_REQUEST_LOGS", "1")
     os.chdir(PROJECT_ROOT)
 
     manager_config_path = data_root / "manager-config.json"
@@ -51,10 +52,11 @@ def main() -> int:
     )
     state = store.load_state()
 
-    print(f"Starting manager on http://{state.manager.manager_host}:{state.manager.manager_port}")
+    print(f"Starting manager on http://{state.manager.manager_host}:{state.manager.manager_port}", flush=True)
+    print("Manager request logs are enabled. Open the web UI to see GET/POST lines here.", flush=True)
     if first_run:
-        print(f"First run detected. Default manager password: {DEFAULT_MANAGER_PASSWORD}")
-        print("You can now configure presets in the web UI.")
+        print(f"First run detected. Default manager password: {DEFAULT_MANAGER_PASSWORD}", flush=True)
+        print("You can now configure presets in the web UI.", flush=True)
 
     uvicorn.run(
         "app.manager_main:app",

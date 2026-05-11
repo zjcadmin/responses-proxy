@@ -54,6 +54,31 @@ def test_tail_logs_returns_latest_lines(tmp_path: Path) -> None:
     assert tail == ["line2", "line3"]
 
 
+def test_start_proxy_uses_unbuffered_child_process_and_records_launch_log(monkeypatch, tmp_path: Path) -> None:
+    manager = ProcessManager(project_root=tmp_path, python_executable=Path(sys.executable))
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, command, **kwargs) -> None:
+            captured["command"] = command
+            captured["env"] = kwargs.get("env")
+
+    monkeypatch.setattr(manager, "ensure_port_available", lambda host, port: None)
+    monkeypatch.setattr(manager, "_wait_for_listen", lambda host, port, timeout_seconds: True)
+    monkeypatch.setattr(process_manager_module.subprocess, "Popen", FakePopen)
+
+    result = manager.start_proxy(tmp_path / "proxy-launch.json", host="127.0.0.1", port=8800)
+
+    assert result.running is True
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert any("Launching proxy command" in line for line in manager.tail_file(manager.stdout_log_path, lines=10))
+
+
 def test_find_listening_pids_uses_cross_platform_psutil(monkeypatch, tmp_path: Path) -> None:
     manager = ProcessManager(project_root=tmp_path, python_executable=Path(sys.executable))
 

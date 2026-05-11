@@ -10,5 +10,7 @@ if ($args.Count -gt 0) {
 }
 
 Set-Location $scriptDir
+$env:PYTHONUNBUFFERED = "1"
+$env:PYTHONIOENCODING = "utf-8"
 & $python @argsList
 exit $LASTEXITCODE

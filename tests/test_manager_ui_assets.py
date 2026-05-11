@@ -36,3 +36,15 @@ def test_manager_app_uses_dashboard_shell_and_live_region_refreshes() -> None:
     assert "syncDashboard();" in source
     assert 'api("/api/settings")' in source
     assert 'id="settings-form"' in source
+
+
+def test_manager_app_has_i18n_and_chinese_log_tabs() -> None:
+    app_js = Path(__file__).resolve().parents[1] / "app" / "static" / "app.js"
+    source = app_js.read_text(encoding="utf-8")
+
+    assert "const I18N" in source
+    assert "function t(key)" in source
+    assert 'data-action="toggle-language"' in source
+    assert "管理台事件" in source
+    assert "Proxy 标准输出" in source
+    assert "Proxy 错误输出" in source

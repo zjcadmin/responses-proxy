@@ -13,4 +13,6 @@ if [ -z "$PYTHON_BIN" ]; then
   fi
 fi
 
+export PYTHONUNBUFFERED=1
+export PYTHONIOENCODING=utf-8
 exec "$PYTHON_BIN" scripts/run_manager.py "$@"

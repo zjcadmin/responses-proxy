@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import time
 from typing import Any
 
 import httpx
@@ -8,18 +11,22 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.config import Settings, load_settings
-from app.hosted_tools import build_hosted_tool_context_messages
+from app.hosted_tools import build_hosted_tool_context
+from app.protocol import analyze_protocol, strict_protocol_error
 from app.store import ConversationStore
 from app.translator import (
     PreparedChatRequest,
     StreamAccumulator,
     UnsupportedFeatureError,
     build_error,
+    build_response_envelope,
     make_id,
     prepare_chat_request,
     build_response_from_upstream,
 )
 from app.upstream import UpstreamChatClient, UpstreamHTTPError
+
+STREAM_KEEPALIVE_SECONDS = 10.0
 
 
 def create_app(
@@ -27,13 +34,32 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     settings = load_settings(settings_overrides)
-    store = ConversationStore()
+    store = ConversationStore(settings.state_store_path)
     upstream = UpstreamChatClient(settings, transport=transport)
+    inflight = InFlightRegistry()
 
     app = FastAPI(title=settings.app_name)
     app.state.settings = settings
     app.state.store = store
     app.state.upstream = upstream
+    app.state.inflight = inflight
+
+    if os.getenv("RESPONSES_PROXY_ENABLE_REQUEST_LOGS") == "1":
+
+        @app.middleware("http")
+        async def request_log_middleware(request: Request, call_next):
+            started = time.perf_counter()
+            status_code = 500
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                return response
+            finally:
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                print(
+                    f"{request.method} {request.url.path} -> {status_code} ({elapsed_ms} ms)",
+                    flush=True,
+                )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -54,17 +80,26 @@ def create_app(
         if authorized is not None:
             return authorized
 
+        protocol_report = analyze_protocol(payload)
+        if settings.strict_protocol:
+            protocol_error = strict_protocol_error(protocol_report)
+            if protocol_error:
+                return error_response(400, protocol_error)
+
         conversation_history = load_conversation_history(store, payload)
         if isinstance(conversation_history, JSONResponse):
             return conversation_history
 
         try:
-            hosted_tool_messages = await build_hosted_tool_context_messages(payload, settings, transport)
+            hosted_tool_context = await build_hosted_tool_context(payload, settings, transport)
             prepared = prepare_chat_request(
                 payload,
                 settings,
                 conversation_history,
-                hosted_tool_messages=hosted_tool_messages,
+                hosted_tool_messages=hosted_tool_context.messages,
+                hosted_output_items=hosted_tool_context.output_items,
+                hosted_annotations=hosted_tool_context.annotations,
+                protocol_report=protocol_report,
             )
         except UnsupportedFeatureError as exc:
             return error_response(400, str(exc))
@@ -79,12 +114,48 @@ def create_app(
                 error_type="authentication_error",
             )
 
+        if payload.get("background"):
+            response_id = make_id("resp")
+            queued_response = build_response_envelope(
+                payload=payload,
+                response_id=response_id,
+                created_at=now_epoch(),
+                completed_at=None,
+                status="queued",
+                output=[],
+                output_text="",
+                usage=None,
+                incomplete_details=None,
+                protocol_report=protocol_report,
+            )
+            store.save(
+                response_id,
+                queued_response,
+                prepared.conversation_messages,
+                input_items=prepared.input_items,
+                conversation_key=resolve_conversation_key(payload),
+                save_response_id=payload.get("store", True),
+            )
+            task = asyncio.create_task(
+                run_background_response(
+                    payload=payload,
+                    prepared=prepared,
+                    response_id=response_id,
+                    upstream=upstream,
+                    upstream_token=upstream_token,
+                    store=store,
+                    inflight=inflight,
+                )
+            )
+            inflight.register(response_id, task)
+            return JSONResponse(queued_response)
+
         if payload.get("stream"):
             response_id = make_id("resp")
             try:
                 upstream_stream = await upstream.open_stream(prepared.upstream_payload, upstream_token)
             except UpstreamHTTPError as exc:
-                return JSONResponse(status_code=exc.status_code, content=normalize_upstream_error(exc))
+                return JSONResponse(status_code=normalize_upstream_status_code(exc), content=normalize_upstream_error(exc))
             except httpx.HTTPError as exc:
                 return error_response(
                     502,
@@ -98,6 +169,7 @@ def create_app(
                     response_id=response_id,
                     upstream_stream=upstream_stream,
                     store=store,
+                    inflight=inflight,
                     conversation_history=conversation_history,
                 ),
                 media_type="text/event-stream",
@@ -111,11 +183,18 @@ def create_app(
         try:
             upstream_response = await upstream.create_completion(prepared.upstream_payload, upstream_token)
             response_id = make_id("resp")
-            response, history_output = build_response_from_upstream(payload, upstream_response, response_id)
+            response, history_output = build_response_from_upstream(
+                payload,
+                upstream_response,
+                response_id,
+                hosted_output_items=prepared.hosted_output_items,
+                hosted_annotations=prepared.hosted_annotations,
+                protocol_report=prepared.protocol_report,
+            )
         except UnsupportedFeatureError as exc:
             return error_response(502, str(exc), error_type="upstream_response_error")
         except UpstreamHTTPError as exc:
-            return JSONResponse(status_code=exc.status_code, content=normalize_upstream_error(exc))
+            return JSONResponse(status_code=normalize_upstream_status_code(exc), content=normalize_upstream_error(exc))
 
         conversation_key = resolve_conversation_key(payload)
         if payload.get("store", True) or conversation_key:
@@ -123,6 +202,7 @@ def create_app(
                 response_id,
                 response,
                 prepared.conversation_messages + history_output,
+                input_items=prepared.input_items,
                 conversation_key=conversation_key,
                 save_response_id=payload.get("store", True),
             )
@@ -140,6 +220,19 @@ def create_app(
         if response is None:
             return error_response(404, f"Unknown response_id `{response_id}`.")
         return JSONResponse(response)
+
+    @app.get("/v1/responses/{response_id}/input_items")
+    async def list_response_input_items(
+        response_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        authorized = authorize_proxy(settings, extract_bearer_token(authorization))
+        if authorized is not None:
+            return authorized
+        input_items = store.get_input_items(response_id)
+        if input_items is None:
+            return error_response(404, f"Unknown response_id `{response_id}`.")
+        return JSONResponse(build_list_response(input_items))
 
     @app.delete("/v1/responses/{response_id}")
     async def delete_response(
@@ -161,6 +254,7 @@ def create_app(
         authorized = authorize_proxy(settings, extract_bearer_token(authorization))
         if authorized is not None:
             return authorized
+        inflight.cancel(response_id)
         response = store.cancel_response(response_id)
         if response is None:
             return error_response(404, f"Unknown response_id `{response_id}`.")
@@ -217,14 +311,35 @@ async def stream_response(
     response_id: str,
     upstream_stream,
     store: ConversationStore,
+    inflight: "InFlightRegistry",
     conversation_history: list[dict[str, Any]],
 ):
-    accumulator = StreamAccumulator(payload=payload, response_id=response_id)
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        inflight.register(response_id, current_task)
+    accumulator = StreamAccumulator(
+        payload=payload,
+        response_id=response_id,
+        hosted_output_items=prepared.hosted_output_items,
+        hosted_annotations=prepared.hosted_annotations,
+        protocol_report=prepared.protocol_report,
+    )
     for event in accumulator.initial_events():
         yield event
 
     try:
-        async for raw_event in upstream_stream.iter_events():
+        upstream_events = upstream_stream.iter_events().__aiter__()
+        next_event_task = asyncio.create_task(upstream_events.__anext__())
+        while True:
+            done, _ = await asyncio.wait({next_event_task}, timeout=STREAM_KEEPALIVE_SECONDS)
+            if not done:
+                yield accumulator.in_progress_event()
+                continue
+            try:
+                raw_event = next_event_task.result()
+            except StopAsyncIteration:
+                break
+            next_event_task = asyncio.create_task(upstream_events.__anext__())
             if raw_event == "[DONE]":
                 break
             chunk = json.loads(raw_event)
@@ -245,6 +360,9 @@ async def stream_response(
         )
         return
     finally:
+        if "next_event_task" in locals() and not next_event_task.done():
+            next_event_task.cancel()
+        inflight.unregister(response_id)
         await upstream_stream.aclose()
 
     final_events, response, history_output = accumulator.finalize()
@@ -257,6 +375,7 @@ async def stream_response(
             response_id,
             response,
             prepared.conversation_messages + history_output,
+            input_items=prepared.input_items,
             conversation_key=conversation_key,
             save_response_id=payload.get("store", True),
         )
@@ -273,6 +392,10 @@ def error_response(
 
 
 def normalize_upstream_error(exc: UpstreamHTTPError) -> dict[str, Any]:
+    if is_upstream_image_input_unsupported(exc):
+        return build_error(
+            "当前上游模型不支持图片输入。请切换到支持视觉/多模态的模型，或关闭图片输入后重试。"
+        )
     if isinstance(exc.payload, dict):
         if "error" in exc.payload and isinstance(exc.payload["error"], dict):
             return exc.payload
@@ -280,6 +403,132 @@ def normalize_upstream_error(exc: UpstreamHTTPError) -> dict[str, Any]:
             return build_error(str(exc.payload["detail"]), error_type="upstream_error")
         return build_error(json.dumps(exc.payload, ensure_ascii=False), error_type="upstream_error")
     return build_error(str(exc.payload), error_type="upstream_error")
+
+
+def normalize_upstream_status_code(exc: UpstreamHTTPError) -> int:
+    if is_upstream_image_input_unsupported(exc):
+        return 400
+    return exc.status_code
+
+
+def is_upstream_image_input_unsupported(exc: UpstreamHTTPError) -> bool:
+    payload_text = json.dumps(exc.payload, ensure_ascii=False).lower()
+    return (
+        "image input" in payload_text
+        and (
+            "no endpoints found" in payload_text
+            or "not support" in payload_text
+            or "unsupported" in payload_text
+        )
+    )
+
+
+class InFlightRegistry:
+    def __init__(self) -> None:
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
+
+    def register(self, response_id: str, task: asyncio.Task[Any]) -> None:
+        self._tasks[response_id] = task
+
+    def unregister(self, response_id: str) -> None:
+        self._tasks.pop(response_id, None)
+
+    def cancel(self, response_id: str) -> bool:
+        task = self._tasks.get(response_id)
+        if task is None:
+            return False
+        task.cancel()
+        return True
+
+
+async def run_background_response(
+    *,
+    payload: dict[str, Any],
+    prepared: PreparedChatRequest,
+    response_id: str,
+    upstream: UpstreamChatClient,
+    upstream_token: str,
+    store: ConversationStore,
+    inflight: InFlightRegistry,
+) -> None:
+    in_progress = build_response_envelope(
+        payload=payload,
+        response_id=response_id,
+        created_at=now_epoch(),
+        completed_at=None,
+        status="in_progress",
+        output=[],
+        output_text="",
+        usage=None,
+        incomplete_details=None,
+        protocol_report=prepared.protocol_report,
+    )
+    store.update_response(response_id, in_progress)
+    try:
+        upstream_response = await upstream.create_completion(prepared.upstream_payload, upstream_token)
+        response, history_output = build_response_from_upstream(
+            payload,
+            upstream_response,
+            response_id,
+            hosted_output_items=prepared.hosted_output_items,
+            hosted_annotations=prepared.hosted_annotations,
+            protocol_report=prepared.protocol_report,
+        )
+        store.save(
+            response_id,
+            response,
+            prepared.conversation_messages + history_output,
+            input_items=prepared.input_items,
+            conversation_key=resolve_conversation_key(payload),
+            save_response_id=payload.get("store", True),
+        )
+    except asyncio.CancelledError:
+        store.cancel_response(response_id)
+        raise
+    except UpstreamHTTPError as exc:
+        store.update_response(response_id, failed_response(payload, response_id, normalize_upstream_error(exc)["error"]))
+    except Exception as exc:
+        store.update_response(
+            response_id,
+            failed_response(
+                payload,
+                response_id,
+                build_error(f"Background response failed: {exc}", error_type="internal_error")["error"],
+            ),
+        )
+    finally:
+        inflight.unregister(response_id)
+
+
+def failed_response(payload: dict[str, Any], response_id: str, error: dict[str, Any]) -> dict[str, Any]:
+    return build_response_envelope(
+        payload=payload,
+        response_id=response_id,
+        created_at=now_epoch(),
+        completed_at=now_epoch(),
+        status="failed",
+        output=[],
+        output_text="",
+        usage=None,
+        incomplete_details=None,
+        error=error,
+    )
+
+
+def build_list_response(items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": items,
+        "first_id": items[0]["id"] if items else None,
+        "last_id": items[-1]["id"] if items else None,
+        "has_more": False,
+    }
+
+
+def now_epoch() -> int:
+    import time
+
+    return int(time.time())
 
 
 app = create_app()

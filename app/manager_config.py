@@ -96,6 +96,7 @@ class ModelPresetInput(BaseModel):
     description: str = ""
     api_key_header_name: str = "Authorization"
     api_key_prefix: str = "Bearer "
+    supports_image_input: bool = False
 
     @field_validator("name", "provider", "model", "proxy_host")
     @classmethod
@@ -189,6 +190,7 @@ def presets_example() -> dict[str, Any]:
         request_timeout_seconds=120.0,
         headers={},
         description="Example preset for local setup",
+        supports_image_input=False,
     )
     return ModelPresets(active_preset_id=preset.id, presets=[preset]).model_dump(mode="json")
 

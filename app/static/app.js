@@ -6,6 +6,165 @@ const POLL_INTERVAL_MS = 5000;
 const CLOCK_INTERVAL_MS = 1000;
 const LOG_LINE_LIMIT = 160;
 
+const I18N = {
+  zh: {
+    "status.notStarted": "未启动",
+    "status.running": "系统运行中",
+    "status.error": "启动失败",
+    "status.starting": "启动中",
+    "status.stopped": "已停止",
+    "baseUrl.notReady": "尚未启动代理",
+    "logs.empty": "暂无日志",
+    "logs.events": "管理台事件",
+    "logs.stdout": "Proxy 标准输出",
+    "logs.stderr": "Proxy 错误输出",
+    "logs.title": "运行日志",
+    "logs.subtitle": "如果代理启动失败、上游拒绝请求或端口冲突，先看这里。",
+    "nav.overview": "控制大屏",
+    "nav.overviewNote": "当前状态与快速操作",
+    "nav.presets": "模型预设",
+    "nav.presetsNote": "Base URL / 模型 / Key / 端口",
+    "nav.settings": "环境配置",
+    "nav.settingsNote": "管理 .env 与代理密钥",
+    "nav.preview": "同步预览",
+    "nav.previewNote": "查看将要写入的配置文件",
+    "nav.logs": "运行日志",
+    "nav.logsNote": "排查启动与上游错误",
+    "brand.title": "代理控制大屏",
+    "brand.inactive": "未激活预设",
+    "brand.group": "主导航",
+    "brand.baseUrl": "当前 Base URL",
+    "header.title": "模型代理控制台",
+    "header.subtitle": "点激活或启动代理时，统一同步预设、.env、model-config.json 和运行快照。",
+    "header.refresh": "刷新",
+    "header.logout": "退出",
+    "header.language": "English",
+    "loading.title": "正在连接本地控制台",
+    "loading.body": "正在读取会话、模型预设和代理状态，请稍候。",
+    "login.title": "登录管理台",
+    "login.body": "在这里配置模型预设、环境变量、代理端口，并统一同步到本地运行文件。",
+    "login.password": "访问密码",
+    "login.placeholder": "输入管理台访问密码",
+    "login.submit": "进入控制台",
+    "stats.model": "当前模型",
+    "stats.modelEmpty": "未配置",
+    "stats.modelNote": "请先创建一个模型预设",
+    "stats.proxyPort": "代理端口",
+    "stats.listen": "监听",
+    "stats.activePreset": "激活预设",
+    "stats.inactive": "未激活",
+    "stats.editNote": "点编辑可修改模型信息",
+    "stats.syncTarget": "同步目标",
+    "stats.notSynced": "未同步",
+    "actions.title": "代理控制",
+    "actions.subtitle": "启动前会自动同步当前预设和环境配置。",
+    "actions.start": "启动代理",
+    "actions.restart": "重启代理",
+    "actions.stop": "停止代理",
+    "actions.copy": "复制 Base URL",
+    "actions.currentAddress": "当前访问地址",
+    "preview.path": "文件路径",
+    "preview.empty": "暂无同步内容",
+    "toast.refreshed": "状态已刷新。",
+    "toast.activated": "预设已激活并同步。",
+    "toast.activateRestart": "预设已激活，代理已重启。",
+    "toast.testDone": "连接测试已完成。",
+    "toast.testOk": "连接成功。",
+    "toast.testFailed": "连接失败。",
+    "toast.deleted": "预设已删除。",
+    "toast.proxyStarted": "代理已启动。",
+    "toast.proxyRestarted": "代理已重启。",
+    "toast.proxyStopped": "代理已停止。",
+    "toast.noBaseUrl": "代理尚未启动，暂时没有可复制的地址。",
+    "toast.copied": "Codex Base URL 已复制。",
+    "toast.copyFailed": "复制失败，请手动复制页面中的地址。",
+    "toast.login": "已进入控制台。",
+    "toast.logout": "已退出登录。",
+    "confirm.deletePreset": "确定删除这套预设吗？",
+  },
+  en: {
+    "status.notStarted": "Not started",
+    "status.running": "Running",
+    "status.error": "Start failed",
+    "status.starting": "Starting",
+    "status.stopped": "Stopped",
+    "baseUrl.notReady": "Proxy is not running",
+    "logs.empty": "No logs yet",
+    "logs.events": "manager events",
+    "logs.stdout": "proxy stdout",
+    "logs.stderr": "proxy stderr",
+    "logs.title": "Runtime Logs",
+    "logs.subtitle": "Check here first when startup, upstream, or port binding fails.",
+    "nav.overview": "Dashboard",
+    "nav.overviewNote": "Status and quick actions",
+    "nav.presets": "Model Presets",
+    "nav.presetsNote": "Base URL / model / key / port",
+    "nav.settings": "Environment",
+    "nav.settingsNote": "Manage .env and proxy key",
+    "nav.preview": "Sync Preview",
+    "nav.previewNote": "Preview generated config files",
+    "nav.logs": "Runtime Logs",
+    "nav.logsNote": "Inspect startup and upstream errors",
+    "brand.title": "Proxy Dashboard",
+    "brand.inactive": "No active preset",
+    "brand.group": "Navigation",
+    "brand.baseUrl": "Current Base URL",
+    "header.title": "Model Proxy Console",
+    "header.subtitle": "Activation/start syncs presets, .env, model-config.json, and launch snapshots.",
+    "header.refresh": "Refresh",
+    "header.logout": "Logout",
+    "header.language": "中文",
+    "loading.title": "Connecting to Local Console",
+    "loading.body": "Loading session, presets, and proxy status.",
+    "login.title": "Manager Login",
+    "login.body": "Configure model presets, environment variables, proxy ports, and local runtime files.",
+    "login.password": "Access Password",
+    "login.placeholder": "Enter manager access password",
+    "login.submit": "Enter Console",
+    "stats.model": "Current Model",
+    "stats.modelEmpty": "Not configured",
+    "stats.modelNote": "Create a model preset first",
+    "stats.proxyPort": "Proxy Port",
+    "stats.listen": "listening",
+    "stats.activePreset": "Active Preset",
+    "stats.inactive": "Inactive",
+    "stats.editNote": "Edit the preset to change model info",
+    "stats.syncTarget": "Sync Target",
+    "stats.notSynced": "Not synced",
+    "actions.title": "Proxy Control",
+    "actions.subtitle": "Starting the proxy syncs the active preset and environment first.",
+    "actions.start": "Start Proxy",
+    "actions.restart": "Restart Proxy",
+    "actions.stop": "Stop Proxy",
+    "actions.copy": "Copy Base URL",
+    "actions.currentAddress": "Current Address",
+    "preview.path": "File path",
+    "preview.empty": "No synced content",
+    "toast.refreshed": "Status refreshed.",
+    "toast.activated": "Preset activated and synced.",
+    "toast.activateRestart": "Preset activated and proxy restarted.",
+    "toast.testDone": "Connection test completed.",
+    "toast.testOk": "Connection succeeded.",
+    "toast.testFailed": "Connection failed.",
+    "toast.deleted": "Preset deleted.",
+    "toast.proxyStarted": "Proxy started.",
+    "toast.proxyRestarted": "Proxy restarted.",
+    "toast.proxyStopped": "Proxy stopped.",
+    "toast.noBaseUrl": "Proxy is not running, no address to copy.",
+    "toast.copied": "Codex Base URL copied.",
+    "toast.copyFailed": "Copy failed. Please copy the address manually.",
+    "toast.login": "Logged in.",
+    "toast.logout": "Logged out.",
+    "confirm.deletePreset": "Delete this preset?",
+  },
+};
+
+function initialLanguage() {
+  const stored = window.localStorage?.getItem("responses_proxy_language");
+  if (stored === "zh" || stored === "en") return stored;
+  return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
 const state = {
   authenticated: false,
   sessionChecked: false,
@@ -36,7 +195,16 @@ const state = {
   dashboardMounted: false,
   busyAction: "",
   nowLabel: "",
+  lang: initialLanguage(),
 };
+
+function t(key) {
+  return I18N[state.lang]?.[key] || I18N.zh[key] || key;
+}
+
+function applyLanguage() {
+  document.documentElement.lang = state.lang === "zh" ? "zh-CN" : "en";
+}
 
 function nowString() {
   const value = new Date();
@@ -107,7 +275,7 @@ function prettyJson(value) {
 function logLines(key) {
   const lines = state.logs?.[key];
   if (!Array.isArray(lines) || !lines.length) {
-    return "暂无日志";
+    return t("logs.empty");
   }
   return lines.slice(-LOG_LINE_LIMIT).join("\n");
 }
@@ -129,11 +297,11 @@ function getActivePreset() {
 }
 
 function proxyStatusLabel(proxy) {
-  if (!proxy) return "未启动";
-  if (proxy.running) return "系统运行中";
-  if (proxy.state === "error") return "启动失败";
-  if (proxy.state === "starting") return "启动中";
-  return "已停止";
+  if (!proxy) return t("status.notStarted");
+  if (proxy.running) return t("status.running");
+  if (proxy.state === "error") return t("status.error");
+  if (proxy.state === "starting") return t("status.starting");
+  return t("status.stopped");
 }
 
 function proxyStatusTone(proxy) {
@@ -145,7 +313,7 @@ function proxyStatusTone(proxy) {
 }
 
 function currentBaseUrl() {
-  return getProxy()?.base_url || "尚未启动代理";
+  return getProxy()?.base_url || t("baseUrl.notReady");
 }
 
 function isBusy(actionName = "") {
@@ -168,11 +336,11 @@ function setRegion(id, html) {
 
 function navItems() {
   return [
-    { id: "overview", label: "控制大屏", icon: "📊", note: "当前状态与快速操作" },
-    { id: "presets", label: "模型预设", icon: "🧩", note: "Base URL / 模型 / Key / 端口" },
-    { id: "settings", label: "环境配置", icon: "🔐", note: "管理 .env 与代理密钥" },
-    { id: "preview", label: "同步预览", icon: "🗂", note: "查看将要写入的配置文件" },
-    { id: "logs", label: "运行日志", icon: "📝", note: "排查启动与上游错误" },
+    { id: "overview", label: t("nav.overview"), icon: "📊", note: t("nav.overviewNote") },
+    { id: "presets", label: t("nav.presets"), icon: "🧩", note: t("nav.presetsNote") },
+    { id: "settings", label: t("nav.settings"), icon: "🔐", note: t("nav.settingsNote") },
+    { id: "preview", label: t("nav.preview"), icon: "🗂", note: t("nav.previewNote") },
+    { id: "logs", label: t("nav.logs"), icon: "📝", note: t("nav.logsNote") },
   ];
 }
 
@@ -199,14 +367,15 @@ function previewPath() {
 }
 
 function render() {
+  applyLanguage();
   if (!state.sessionChecked) {
     state.dashboardMounted = false;
     root.innerHTML = `
       <div class="login-shell">
         <section class="login-card">
           <div class="login-badge">Responses Proxy</div>
-          <h1>正在连接本地控制台</h1>
-          <p>正在读取会话、模型预设和代理状态，请稍候。</p>
+          <h1>${t("loading.title")}</h1>
+          <p>${t("loading.body")}</p>
         </section>
       </div>
     `;
@@ -220,21 +389,21 @@ function render() {
       <div class="login-shell">
         <section class="login-card">
           <div class="login-badge">Responses Proxy</div>
-          <h1>登录管理台</h1>
-          <p>在这里配置模型预设、环境变量、代理端口，并统一同步到本地运行文件。</p>
+          <h1>${t("login.title")}</h1>
+          <p>${t("login.body")}</p>
           <form id="login-form" class="login-form">
             <label class="field">
-              <span>访问密码</span>
+              <span>${t("login.password")}</span>
               <input
                 class="input"
                 id="password"
                 name="password"
                 type="password"
-                placeholder="输入管理台访问密码"
+                placeholder="${t("login.placeholder")}"
                 autocomplete="current-password"
               />
             </label>
-            <button class="button button-primary" type="submit">进入控制台</button>
+            <button class="button button-primary" type="submit">${t("login.submit")}</button>
             <div class="error-text">${escapeHtml(state.loginError)}</div>
           </form>
         </section>
@@ -288,12 +457,12 @@ function renderSidebar(activePreset) {
     <div class="sidebar-brand">
       <div class="sidebar-logo">⚙</div>
       <div>
-        <div class="sidebar-title">代理控制大屏</div>
-        <div class="sidebar-subtitle">${escapeHtml(activePreset?.name || "未激活预设")}</div>
+        <div class="sidebar-title">${t("brand.title")}</div>
+        <div class="sidebar-subtitle">${escapeHtml(activePreset?.name || t("brand.inactive"))}</div>
       </div>
     </div>
 
-    <div class="sidebar-group-label">主导航</div>
+    <div class="sidebar-group-label">${t("brand.group")}</div>
     <nav class="sidebar-nav">
       ${items
         .map(
@@ -315,7 +484,7 @@ function renderSidebar(activePreset) {
     </nav>
 
     <div class="sidebar-footer">
-      <div>当前 Base URL</div>
+      <div>${t("brand.baseUrl")}</div>
       <code>${escapeHtml(currentBaseUrl())}</code>
     </div>
   `;
@@ -327,8 +496,8 @@ function renderHeader(proxy, activePreset, manager) {
       <div class="topbar-title">
         <div class="topbar-icon">📈</div>
         <div>
-          <h1>模型代理控制台</h1>
-          <p>点激活或启动代理时，统一同步预设、.env、model-config.json 和运行快照。</p>
+          <h1>${t("header.title")}</h1>
+          <p>${t("header.subtitle")}</p>
         </div>
       </div>
       <div class="topbar-meta">
@@ -337,8 +506,9 @@ function renderHeader(proxy, activePreset, manager) {
           <span>${escapeHtml(proxyStatusLabel(proxy))}</span>
         </div>
         <div class="topbar-time">${escapeHtml(state.nowLabel || nowString())}</div>
-        <button class="button button-ghost" data-action="refresh" ${buttonDisabled(isBusy())}>刷新</button>
-        <button class="button button-ghost" data-action="logout" ${buttonDisabled(isBusy())}>退出</button>
+        <button class="button button-ghost language-toggle" data-action="toggle-language">${t("header.language")}</button>
+        <button class="button button-ghost" data-action="refresh" ${buttonDisabled(isBusy())}>${t("header.refresh")}</button>
+        <button class="button button-ghost" data-action="logout" ${buttonDisabled(isBusy())}>${t("header.logout")}</button>
       </div>
     </section>
   `;
@@ -380,29 +550,29 @@ function renderOverviewPage(proxy, activePreset) {
 function renderStats(proxy, activePreset) {
   const cards = [
     {
-      title: "当前模型",
-      value: activePreset?.model || "未配置",
-      note: activePreset?.provider || "请先创建一个模型预设",
+      title: t("stats.model"),
+      value: activePreset?.model || t("stats.modelEmpty"),
+      note: activePreset?.provider || t("stats.modelNote"),
       accent: "blue",
       icon: "🤖",
     },
     {
-      title: "代理端口",
+      title: t("stats.proxyPort"),
       value: String(proxy?.port || activePreset?.proxy_port || "8800"),
-      note: `${activePreset?.proxy_host || proxy?.host || "127.0.0.1"} 监听`,
+      note: `${activePreset?.proxy_host || proxy?.host || "127.0.0.1"} ${t("stats.listen")}`,
       accent: "green",
       icon: "🔌",
     },
     {
-      title: "激活预设",
-      value: activePreset?.name || "未激活",
-      note: activePreset?.base_url || "点编辑可修改模型信息",
+      title: t("stats.activePreset"),
+      value: activePreset?.name || t("stats.inactive"),
+      note: activePreset?.base_url || t("stats.editNote"),
       accent: "purple",
       icon: "🧠",
     },
     {
-      title: "同步目标",
-      value: state.settings?.sync?.active_preset_name || "未同步",
+      title: t("stats.syncTarget"),
+      value: state.settings?.sync?.active_preset_name || t("stats.notSynced"),
       note: state.settings?.sync?.env_path || ".env",
       accent: "orange",
       icon: "🗄",
@@ -434,18 +604,18 @@ function renderQuickActionsSection(proxy, activePreset) {
     <section class="panel-card quick-card">
       <div class="card-header">
         <div>
-          <div class="card-title">代理控制</div>
-          <div class="card-subtitle">启动前会自动同步当前预设和环境配置。</div>
+          <div class="card-title">${t("actions.title")}</div>
+          <div class="card-subtitle">${t("actions.subtitle")}</div>
         </div>
       </div>
       <div class="action-stack">
-        <button class="button button-primary" data-action="start-proxy" ${buttonDisabled(getProxy()?.running || isBusy() || !activePreset)}>启动代理</button>
-        <button class="button button-secondary" data-action="restart-proxy" ${buttonDisabled(isBusy() || !activePreset)}>重启代理</button>
-        <button class="button button-danger button-soft" data-action="stop-proxy" ${buttonDisabled(!getProxy()?.running || isBusy())}>停止代理</button>
-        <button class="button button-ghost" data-action="copy-base-url" ${buttonDisabled(!proxy?.base_url)}>复制 Base URL</button>
+        <button class="button button-primary" data-action="start-proxy" ${buttonDisabled(getProxy()?.running || isBusy() || !activePreset)}>${t("actions.start")}</button>
+        <button class="button button-secondary" data-action="restart-proxy" ${buttonDisabled(isBusy() || !activePreset)}>${t("actions.restart")}</button>
+        <button class="button button-danger button-soft" data-action="stop-proxy" ${buttonDisabled(!getProxy()?.running || isBusy())}>${t("actions.stop")}</button>
+        <button class="button button-ghost" data-action="copy-base-url" ${buttonDisabled(!proxy?.base_url)}>${t("actions.copy")}</button>
       </div>
       <div class="mini-stat single">
-        <span>当前访问地址</span>
+        <span>${t("actions.currentAddress")}</span>
         <strong>${escapeHtml(currentBaseUrl())}</strong>
         <small>${escapeHtml(proxyStatusLabel(proxy))}</small>
       </div>
@@ -776,26 +946,26 @@ function renderPreviewSection(activePreset) {
           .join("")}
       </div>
       <div class="preview-meta">
-        <span>文件路径</span>
+        <span>${t("preview.path")}</span>
         <code>${escapeHtml(previewPath())}</code>
       </div>
-      <pre class="preview-box">${escapeHtml(previewContent() || "暂无同步内容")}</pre>
+      <pre class="preview-box">${escapeHtml(previewContent() || t("preview.empty"))}</pre>
     </section>
   `;
 }
 
 function renderLogsSection() {
   const tabs = [
-    { key: "events", label: "Manager Events" },
-    { key: "stdout", label: "Proxy Stdout" },
-    { key: "stderr", label: "Proxy Stderr" },
+    { key: "events", label: t("logs.events") },
+    { key: "stdout", label: t("logs.stdout") },
+    { key: "stderr", label: t("logs.stderr") },
   ];
   return `
     <section class="panel-card panel-side" id="section-logs">
       <div class="card-header">
         <div>
-          <div class="card-title">运行日志</div>
-          <div class="card-subtitle">如果代理启动失败、上游拒绝请求或端口冲突，先看这里。</div>
+          <div class="card-title">${t("logs.title")}</div>
+          <div class="card-subtitle">${t("logs.subtitle")}</div>
         </div>
       </div>
       <div class="tabs-row">
@@ -814,9 +984,9 @@ function renderLogsSection() {
           .join("")}
       </div>
       <div class="card-actions log-actions">
-        <button class="button button-primary" data-action="start-proxy" ${buttonDisabled(getProxy()?.running || isBusy())}>启动代理</button>
-        <button class="button button-secondary" data-action="restart-proxy" ${buttonDisabled(isBusy())}>重启代理</button>
-        <button class="button button-danger button-soft" data-action="stop-proxy" ${buttonDisabled(!getProxy()?.running || isBusy())}>停止代理</button>
+        <button class="button button-primary" data-action="start-proxy" ${buttonDisabled(getProxy()?.running || isBusy())}>${t("actions.start")}</button>
+        <button class="button button-secondary" data-action="restart-proxy" ${buttonDisabled(isBusy())}>${t("actions.restart")}</button>
+        <button class="button button-danger button-soft" data-action="stop-proxy" ${buttonDisabled(!getProxy()?.running || isBusy())}>${t("actions.stop")}</button>
       </div>
       <pre class="log-box">${escapeHtml(logLines(state.activeLogTab))}</pre>
     </section>
@@ -842,6 +1012,7 @@ function renderPresetModal() {
     chat_path: "/chat/completions",
     api_key: "",
     model: "",
+    supports_image_input: false,
     proxy_host: "127.0.0.1",
     proxy_port: 8800,
     request_timeout_seconds: 120,
@@ -884,6 +1055,11 @@ function renderPresetModal() {
             <label class="field">
               <span>模型名</span>
               <input class="input" name="model" value="${escapeHtml(preset.model)}" required />
+            </label>
+            <label class="field field-check">
+              <input type="checkbox" name="supports_image_input" ${preset.supports_image_input ? "checked" : ""} />
+              <span>支持图片输入</span>
+              <small>仅在上游模型确实支持视觉或多模态时启用。</small>
             </label>
             <label class="field field-wide">
               <span>API Key</span>
@@ -1084,7 +1260,7 @@ async function handleLogin(event) {
     render();
     startPolling();
     startClock();
-    showToast("已进入控制台。", "success");
+    showToast(t("toast.login"), "success");
   } catch (error) {
     state.loginError = error.message;
     render();
@@ -1111,7 +1287,7 @@ async function handleLogout() {
     state.logs = { events: [], stdout: [], stderr: [] };
     state.busyAction = "";
     render();
-    showToast("已退出登录。", "info");
+    showToast(t("toast.logout"), "info");
   } catch (error) {
     state.busyAction = "";
     syncDashboard();
@@ -1177,6 +1353,7 @@ async function handlePresetSubmit(event) {
     chat_path: form.chat_path.value.trim(),
     api_key: form.api_key.value.trim(),
     model: form.model.value.trim(),
+    supports_image_input: Boolean(form.supports_image_input?.checked),
     proxy_host: form.proxy_host.value.trim(),
     proxy_port: Number(form.proxy_port.value),
     request_timeout_seconds: Number(form.request_timeout_seconds.value),
@@ -1282,14 +1459,14 @@ async function handlePasswordSubmit(event) {
 async function copyBaseUrl() {
   const value = getProxy()?.base_url;
   if (!value) {
-    showToast("代理尚未启动，暂时没有可复制的地址。", "error");
+    showToast(t("toast.noBaseUrl"), "error");
     return;
   }
   try {
     await navigator.clipboard.writeText(value);
-    showToast("Codex Base URL 已复制。", "success");
+    showToast(t("toast.copied"), "success");
   } catch (error) {
-    showToast("复制失败，请手动复制页面中的地址。", "error");
+    showToast(t("toast.copyFailed"), "error");
   }
 }
 
@@ -1314,8 +1491,13 @@ async function handleActionClick(event) {
     case "logout":
       await handleLogout();
       return;
+    case "toggle-language":
+      state.lang = state.lang === "zh" ? "en" : "zh";
+      window.localStorage?.setItem("responses_proxy_language", state.lang);
+      render();
+      return;
     case "refresh":
-      await runAction("refresh", "状态已刷新。", async () => {
+      await runAction("refresh", t("toast.refreshed"), async () => {
         await loadInitialDashboard();
         return state.status;
       });
@@ -1353,7 +1535,7 @@ async function handleActionClick(event) {
     case "activate-preset":
       await runAction(
         "activate-preset",
-        "预设已激活并同步。",
+        t("toast.activated"),
         async () => api(`/api/presets/${id}/activate`, { method: "POST" }),
         { refreshAll: true }
       );
@@ -1361,7 +1543,7 @@ async function handleActionClick(event) {
     case "activate-restart":
       await runAction(
         "activate-restart",
-        "预设已激活，代理已重启。",
+        t("toast.activateRestart"),
         async () => {
           await api(`/api/presets/${id}/activate`, { method: "POST" });
           return api("/api/proxy/restart", {
@@ -1373,19 +1555,19 @@ async function handleActionClick(event) {
       );
       return;
     case "test-preset":
-      await runAction("test-preset", "连接测试已完成。", async () => {
+      await runAction("test-preset", t("toast.testDone"), async () => {
         const result = await api(`/api/presets/${id}/test`, { method: "POST" });
-        showToast(result.message || (result.ok ? "连接成功。" : "连接失败。"), result.ok ? "success" : "error");
+        showToast(result.message || (result.ok ? t("toast.testOk") : t("toast.testFailed")), result.ok ? "success" : "error");
         return state.status;
       });
       return;
     case "delete-preset":
-      if (!window.confirm("确定删除这套预设吗？")) {
+      if (!window.confirm(t("confirm.deletePreset"))) {
         return;
       }
       await runAction(
         "delete-preset",
-        "预设已删除。",
+        t("toast.deleted"),
         async () => {
           await api(`/api/presets/${id}`, { method: "DELETE" });
           return state.status;
@@ -1394,14 +1576,14 @@ async function handleActionClick(event) {
       );
       return;
     case "start-proxy":
-      await runAction("start-proxy", "代理已启动。", async () => api("/api/proxy/start", { method: "POST" }), {
+      await runAction("start-proxy", t("toast.proxyStarted"), async () => api("/api/proxy/start", { method: "POST" }), {
         refreshAll: true,
       });
       return;
     case "restart-proxy":
       await runAction(
         "restart-proxy",
-        "代理已重启。",
+        t("toast.proxyRestarted"),
         async () => api("/api/proxy/restart", { method: "POST" }),
         { refreshAll: true }
       );
@@ -1409,7 +1591,7 @@ async function handleActionClick(event) {
     case "stop-proxy":
       await runAction(
         "stop-proxy",
-        "代理已停止。",
+        t("toast.proxyStopped"),
         async () => api("/api/proxy/stop", { method: "POST" }),
         { refreshAll: true }
       );

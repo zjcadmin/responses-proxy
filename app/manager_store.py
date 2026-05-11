@@ -31,6 +31,7 @@ MANAGED_ENV_KEYS = [
     "RESPONSES_PROXY_UPSTREAM_HEADERS",
     "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME",
     "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX",
+    "RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT",
     "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS",
     "RESPONSES_PROXY_WEB_SEARCH_BACKEND",
     "RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL",
@@ -286,6 +287,7 @@ class ManagerStore:
             request_timeout_seconds=float(model_config.get("request_timeout_seconds", 120.0)),
             headers={},
             description="Imported from legacy local files.",
+            supports_image_input=bool(model_config.get("upstream_supports_image_input", False)),
         )
         return ModelPreset(
             id=f"preset_{uuid4().hex[:12]}",
@@ -305,6 +307,7 @@ class ManagerStore:
             "upstream_headers": preset.headers,
             "upstream_api_key_header_name": preset.api_key_header_name,
             "upstream_api_key_prefix": preset.api_key_prefix,
+            "upstream_supports_image_input": preset.supports_image_input,
             "request_timeout_seconds": preset.request_timeout_seconds,
             "web_search_backend": manager.web_search_backend,
             "web_search_searxng_url": manager.web_search_searxng_url,
@@ -331,6 +334,9 @@ class ManagerStore:
             "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX": str(
                 launch_payload.get("upstream_api_key_prefix", "Bearer ")
             ),
+            "RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT": str(
+                bool(launch_payload.get("upstream_supports_image_input", False))
+            ).lower(),
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": str(
                 launch_payload.get("request_timeout_seconds", 120.0)
             ),

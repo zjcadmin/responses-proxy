@@ -37,15 +37,30 @@ def apply_launch_config(config: LaunchConfig) -> None:
 
 
 def resolved_runtime_payload(config: LaunchConfig) -> dict[str, object]:
+    config_values = config.model_dump()
+    effective_env = config.to_env()
+    for key in ("upstream_api_key", "proxy_api_key"):
+        config_values[key] = mask_secret(config_values.get(key))
+    for key in ("RESPONSES_PROXY_UPSTREAM_API_KEY", "RESPONSES_PROXY_PROXY_API_KEY"):
+        effective_env[key] = mask_secret(effective_env.get(key))
     return {
-        "config_file_values": config.model_dump(),
-        "effective_env": config.to_env(),
+        "config_file_values": config_values,
+        "effective_env": effective_env,
         "dotenv_file": ".env",
         "secrets_required": [
             "RESPONSES_PROXY_UPSTREAM_API_KEY",
             "RESPONSES_PROXY_PROXY_API_KEY",
         ],
     }
+
+
+def mask_secret(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "***"
+    return f"{text[:4]}...{text[-4:]}"
 
 
 def ensure_port_available(host: str, port: int) -> None:
@@ -71,20 +86,21 @@ def main() -> int:
 
     config = load_launch_config(config_path)
     apply_launch_config(config)
+    os.environ.setdefault("RESPONSES_PROXY_ENABLE_REQUEST_LOGS", "1")
 
     if args.check:
-        print(json.dumps(resolved_runtime_payload(config), ensure_ascii=False, indent=2))
+        print(json.dumps(resolved_runtime_payload(config), ensure_ascii=False, indent=2), flush=True)
         return 0
 
     try:
         ensure_port_available(config.proxy_host, config.proxy_port)
     except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+        print(str(exc), file=sys.stderr, flush=True)
         return 1
 
-    print(f"Starting responses proxy on http://{config.proxy_host}:{config.proxy_port}")
-    print(f"Using model config: {config_path}")
-    print("Secrets are loaded from .env if present.")
+    print(f"Starting responses proxy on http://{config.proxy_host}:{config.proxy_port}", flush=True)
+    print(f"Using model config: {config_path}", flush=True)
+    print("Secrets are loaded from .env if present.", flush=True)
 
     uvicorn.run(
         "app.main:app",

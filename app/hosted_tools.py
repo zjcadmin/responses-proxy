@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
 import re
+import uuid
 from typing import Any
 
 import httpx
@@ -43,17 +45,35 @@ INTERNAL_CONTEXT_BLOCKS = (
 )
 
 
-async def build_hosted_tool_context_messages(
+@dataclass
+class HostedToolContext:
+    messages: list[dict[str, str]] = field(default_factory=list)
+    output_items: list[dict[str, Any]] = field(default_factory=list)
+    annotations: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class HostedToolSection:
+    content: str
+    output_item: dict[str, Any] | None = None
+    annotations: list[dict[str, Any]] = field(default_factory=list)
+
+
+def make_tool_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+async def build_hosted_tool_context(
     payload: dict[str, Any],
     settings: Settings,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> list[dict[str, str]]:
+) -> HostedToolContext:
     tool_types = collect_hosted_tool_types(payload.get("tools"))
     if not tool_types:
-        return []
+        return HostedToolContext()
 
     query = extract_query_text(payload.get("input"))
-    sections: list[str] = []
+    sections: list[HostedToolSection] = []
     if "web_search" in tool_types or "web_search_preview" in tool_types:
         sections.append(await build_web_search_section(query, settings, transport))
     if "file_search" in tool_types:
@@ -61,10 +81,26 @@ async def build_hosted_tool_context_messages(
     if "computer_use" in tool_types or "computer_use_preview" in tool_types:
         sections.append(build_computer_use_section(payload))
 
-    content = "\n\n".join(section for section in sections if section)
+    content = "\n\n".join(section.content for section in sections if section.content)
     if not content:
-        return []
-    return [{"role": "system", "content": content}]
+        return HostedToolContext()
+    return HostedToolContext(
+        messages=[{"role": "system", "content": content}],
+        output_items=[section.output_item for section in sections if section.output_item],
+        annotations=[
+            annotation
+            for section in sections
+            for annotation in section.annotations
+        ],
+    )
+
+
+async def build_hosted_tool_context_messages(
+    payload: dict[str, Any],
+    settings: Settings,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[dict[str, str]]:
+    return (await build_hosted_tool_context(payload, settings, transport)).messages
 
 
 def collect_hosted_tool_types(tools: Any) -> set[str]:
@@ -87,32 +123,50 @@ async def build_web_search_section(
     query: str,
     settings: Settings,
     transport: httpx.AsyncBaseTransport | None,
-) -> str:
+) -> HostedToolSection:
     backend = settings.web_search_backend.lower()
     if not query:
-        return "Local web search results:\nNo query text was available."
+        return HostedToolSection("Local web search results:\nNo query text was available.")
     try:
         if backend == "searxng" and settings.web_search_searxng_url:
             results = await search_searxng(query, settings, transport)
         elif backend == "tavily" and settings.web_search_tavily_api_key:
             results = await search_tavily(query, settings, transport)
         else:
-            return "Local web search results:\nNo web search backend is configured."
+            return HostedToolSection("Local web search results:\nNo web search backend is configured.")
     except httpx.HTTPStatusError as exc:
-        return (
+        return HostedToolSection(
             f"Local web search results for `{query}`:\n"
             f"Search backend unavailable: HTTP {exc.response.status_code}. Continue without external search results."
         )
     except (httpx.HTTPError, ValueError):
-        return (
+        return HostedToolSection(
             f"Local web search results for `{query}`:\n"
             "Search backend unavailable. Continue without external search results."
         )
     if not results:
-        return f"Local web search results for `{query}`:\nNo results."
-    return "Local web search results for `{}`:\n{}".format(
-        query,
-        "\n".join(format_result(index, result) for index, result in enumerate(results, start=1)),
+        return HostedToolSection(f"Local web search results for `{query}`:\nNo results.")
+    return HostedToolSection(
+        "Local web search results for `{}`:\n{}".format(
+            query,
+            "\n".join(format_result(index, result) for index, result in enumerate(results, start=1)),
+        ),
+        output_item={
+            "id": make_tool_id("ws"),
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"type": "search", "query": query},
+            "results": results,
+        },
+        annotations=[
+            {
+                "type": "url_citation",
+                "url": result.get("url", ""),
+                "title": result.get("title", ""),
+            }
+            for result in results
+            if result.get("url")
+        ],
     )
 
 
@@ -253,26 +307,46 @@ def format_result(index: int, result: dict[str, str]) -> str:
     return f"{index}. {title}\nURL: {url}\nSnippet: {content}"
 
 
-def build_file_search_section(query: str, settings: Settings) -> str:
+def build_file_search_section(query: str, settings: Settings) -> HostedToolSection:
     paths = [Path(path) for path in settings.file_search_paths]
     if not paths:
-        return "Local file search results:\nNo file search paths are configured."
+        return HostedToolSection("Local file search results:\nNo file search paths are configured.")
     terms = tokenize_query(query)
-    matches: list[str] = []
+    matches: list[dict[str, str]] = []
     for root in paths:
         if not root.exists():
             continue
         for path in iter_text_files(root):
             snippet = find_file_snippet(path, terms)
             if snippet:
-                matches.append(f"- {path}: {snippet}")
+                matches.append({"filename": str(path), "text": snippet})
             if len(matches) >= settings.file_search_max_results:
                 break
         if len(matches) >= settings.file_search_max_results:
             break
     if not matches:
-        return f"Local file search results for `{query}`:\nNo matches."
-    return "Local file search results for `{}`:\n{}".format(query, "\n".join(matches))
+        return HostedToolSection(f"Local file search results for `{query}`:\nNo matches.")
+    return HostedToolSection(
+        "Local file search results for `{}`:\n{}".format(
+            query,
+            "\n".join(f"- {match['filename']}: {match['text']}" for match in matches),
+        ),
+        output_item={
+            "id": make_tool_id("fs"),
+            "type": "file_search_call",
+            "status": "completed",
+            "queries": [query] if query else [],
+            "results": matches,
+        },
+        annotations=[
+            {
+                "type": "file_citation",
+                "filename": match["filename"],
+                "text": match["text"],
+            }
+            for match in matches
+        ],
+    )
 
 
 def iter_text_files(root: Path):
@@ -308,12 +382,21 @@ def find_file_snippet(path: Path, terms: list[str]) -> str:
     return ""
 
 
-def build_computer_use_section(payload: dict[str, Any]) -> str:
+def build_computer_use_section(payload: dict[str, Any]) -> HostedToolSection:
     output_count = count_input_items(payload.get("input"), "computer_call_output")
-    return (
-        "Local computer use context:\n"
-        "computer_use_preview is handled by this proxy as local context. "
-        f"Received computer_call_output items: {output_count}."
+    return HostedToolSection(
+        (
+            "Local computer use context:\n"
+            "computer_use_preview is handled by this proxy as local context. "
+            f"Received computer_call_output items: {output_count}."
+        ),
+        output_item={
+            "id": make_tool_id("cu"),
+            "type": "computer_call",
+            "status": "completed",
+            "action": {"type": "inspect"},
+            "received_call_outputs": output_count,
+        },
     )
 
 

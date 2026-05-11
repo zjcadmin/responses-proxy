@@ -151,6 +151,7 @@ def test_store_syncs_active_preset_to_env_and_model_files(tmp_path: Path) -> Non
             description="",
             api_key_header_name="Authorization",
             api_key_prefix="Bearer",
+            supports_image_input=True,
         )
     )
 
@@ -165,6 +166,7 @@ def test_store_syncs_active_preset_to_env_and_model_files(tmp_path: Path) -> Non
     assert env_values["RESPONSES_PROXY_PROXY_API_KEY"] == "proxy-key-123"
     assert env_values["RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX"] == "Bearer"
     assert env_values["RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS"] == "45.0"
+    assert env_values["RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT"] == "true"
     assert env_values["RESPONSES_PROXY_WEB_SEARCH_BACKEND"] == "searxng"
     assert env_values["RESPONSES_PROXY_WEB_SEARCH_SEARXNG_URL"] == "http://127.0.0.1:8080/search"
     assert env_values["RESPONSES_PROXY_WEB_SEARCH_MAX_RESULTS"] == "7"
@@ -175,6 +177,7 @@ def test_store_syncs_active_preset_to_env_and_model_files(tmp_path: Path) -> Non
     runtime_launch = json.loads((tmp_path / "runtime" / "proxy-launch.json").read_text(encoding="utf-8"))
     assert model_config == runtime_launch
     assert model_config["proxy_port"] == 8811
+    assert model_config["upstream_supports_image_input"] is True
     assert model_config["upstream_headers"] == {"X-Provider": "deepseek"}
     assert model_config["web_search_backend"] == "searxng"
     assert model_config["web_search_searxng_url"] == "http://127.0.0.1:8080/search"

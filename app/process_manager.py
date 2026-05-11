@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -81,14 +82,20 @@ class ProcessManager:
 
     def start_proxy(self, launch_config_path: Path, *, host: str, port: int, timeout_seconds: float = 5.0) -> ProcessStatus:
         self.ensure_port_available(host, port)
+        command = self._build_proxy_command(launch_config_path)
+        self._append_log(self.stdout_log_path, f"Launching proxy command: {subprocess.list2cmdline(command)}")
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         stdout_handle = self.stdout_log_path.open("a", encoding="utf-8")
         stderr_handle = self.stderr_log_path.open("a", encoding="utf-8")
         try:
             process = subprocess.Popen(
-                self._build_proxy_command(launch_config_path),
+                command,
                 cwd=self.project_root,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
+                env=env,
             )
         finally:
             stdout_handle.close()
@@ -139,8 +146,11 @@ class ProcessManager:
         return ProcessStatus(state="stopped", running=False, pid=None, host=host, port=port)
 
     def record_event(self, message: str) -> None:
+        self._append_log(self.events_log_path, message)
+
+    def _append_log(self, path: Path, message: str) -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with self.events_log_path.open("a", encoding="utf-8") as handle:
+        with path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] {message}\n")
 
     def tail_file(self, path: Path, *, lines: int) -> list[str]:

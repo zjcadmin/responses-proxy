@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+import ast
 import base64
+import html
 import json
 import platform
 import re
+import shlex
+import subprocess
 import time
 import uuid
 from typing import Any
 
 from app.config import Settings
+from app.protocol import ProtocolReport
 
 IGNORED_HOSTED_TOOL_TYPES = {
     "web_search",
@@ -22,6 +27,11 @@ IGNORED_HOSTED_TOOL_TYPES = {
     "image_generation",
 }
 
+DOCUMENT_SINGLE_SCRIPT_HINT = (
+    "For document processing, report generation, Office files, or project/file generation tasks, "
+    "prefer a single reusable script that reads the required inputs, generates the outputs, and prints a concise summary. "
+    "Do not issue repeated python -c, Get-Content, New-Item, or one-off inspection commands when one script can complete the workflow."
+)
 AGENT_TOOL_USE_HINT = (
     "You are serving an agent runtime through a Chat Completions compatibility layer. "
     "When tools are available and the user asks you to inspect files, run commands, edit files, "
@@ -30,6 +40,7 @@ AGENT_TOOL_USE_HINT = (
     "If the upstream API does not support native tool calls, output exactly one fallback marker "
     'like <tool_call>{"name":"tool_name","arguments":{"arg":"value"}}</tool_call> and no prose. '
     "Only provide a final natural-language answer when the task is actually complete."
+    f" {DOCUMENT_SINGLE_SCRIPT_HINT}"
 )
 PROMPT_TOOL_USE_HINT = (
     "You are serving an agent runtime through a Chat Completions compatibility layer. "
@@ -43,10 +54,20 @@ PROMPT_TOOL_USE_HINT = (
     "or Get-ChildItem on Windows if that is the available shell context. "
     "If the user asks to read a file, call a safe read command. If the user asks to write or edit files, call the "
     "available file or shell tool with the needed action. "
+    "Use only the tool names listed below. Do not invent read, view, open_file, or other unlisted tool names. "
     "Do not describe what a tool is. Do not stop after saying you will run or inspect something. "
     "Only provide a final natural-language answer when the task is actually complete."
+    f" {DOCUMENT_SINGLE_SCRIPT_HINT}"
 )
 TOOL_CALL_MARKER_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+TOOL_CALL_XML_RE = re.compile(
+    r"<tool_call>\s*<function=([A-Za-z0-9_.-]+)>\s*(.*?)</function>\s*</tool_call>",
+    re.DOTALL,
+)
+TOOL_CALL_XML_PARAMETER_RE = re.compile(
+    r"<parameter=([A-Za-z0-9_.-]+)>(.*?)</parameter>",
+    re.DOTALL,
+)
 
 
 class UnsupportedFeatureError(ValueError):
@@ -57,6 +78,10 @@ class UnsupportedFeatureError(ValueError):
 class PreparedChatRequest:
     upstream_payload: dict[str, Any]
     conversation_messages: list[dict[str, Any]]
+    input_items: list[dict[str, Any]]
+    hosted_output_items: list[dict[str, Any]] = field(default_factory=list)
+    hosted_annotations: list[dict[str, Any]] = field(default_factory=list)
+    protocol_report: ProtocolReport | None = None
 
 
 def make_id(prefix: str) -> str:
@@ -72,14 +97,24 @@ def prepare_chat_request(
     settings: Settings,
     conversation_history: list[dict[str, Any]] | None = None,
     hosted_tool_messages: list[dict[str, Any]] | None = None,
+    hosted_output_items: list[dict[str, Any]] | None = None,
+    hosted_annotations: list[dict[str, Any]] | None = None,
+    protocol_report: ProtocolReport | None = None,
 ) -> PreparedChatRequest:
     history = deepcopy(conversation_history or [])
     instructions = payload.get("instructions")
+    if input_contains_image(payload.get("input")) and not settings.upstream_supports_image_input:
+        raise UnsupportedFeatureError(
+            "当前上游模型不支持图片输入。请切换到支持视觉/多模态的模型，"
+            "或在模型预设中启用 `upstream_supports_image_input` 后重启代理。"
+        )
     input_messages = convert_input_to_messages(payload.get("input"))
     if payload.get("previous_response_id"):
-        conversation_messages = history + deepcopy(input_messages)
+        conversation_messages = append_conversation_history(history, input_messages)
     else:
         conversation_messages = merge_conversation_history(history, input_messages)
+    conversation_messages = sanitize_chat_message_sequence(conversation_messages)
+    conversation_messages = hoist_system_messages(conversation_messages)
 
     raw_tools = payload.get("tools")
     compatible_tools = flatten_tools(raw_tools) if isinstance(raw_tools, list) else []
@@ -147,6 +182,10 @@ def prepare_chat_request(
     return PreparedChatRequest(
         upstream_payload=upstream_payload,
         conversation_messages=conversation_messages,
+        input_items=build_input_items(payload.get("input")),
+        hosted_output_items=deepcopy(hosted_output_items or []),
+        hosted_annotations=deepcopy(hosted_annotations or []),
+        protocol_report=protocol_report,
     )
 
 
@@ -193,12 +232,27 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
         raise UnsupportedFeatureError("`input` must be a string, object, or array.")
 
     messages: list[dict[str, Any]] = []
+    pending_function_calls: list[dict[str, Any]] = []
+
+    def flush_pending_function_calls() -> None:
+        if not pending_function_calls:
+            return
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": deepcopy(pending_function_calls),
+            }
+        )
+        pending_function_calls.clear()
+
     for item in items:
         if not isinstance(item, dict):
             raise UnsupportedFeatureError("Each `input` item must be an object.")
 
         item_type = item.get("type")
         if item_type == "function_call_output":
+            flush_pending_function_calls()
             tool_call_id = item.get("call_id") or item.get("id")
             if not tool_call_id:
                 raise UnsupportedFeatureError("`function_call_output` items need `call_id` or `id`.")
@@ -216,6 +270,7 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
             continue
 
         if item_type == "computer_call_output":
+            flush_pending_function_calls()
             messages.append(
                 {
                     "role": "user",
@@ -229,20 +284,14 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
             name = item.get("name")
             if not name:
                 raise UnsupportedFeatureError("`function_call` items need a function `name`.")
-            messages.append(
+            pending_function_calls.append(
                 {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": stringify_value(item.get("arguments", {})),
-                            },
-                        }
-                    ],
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": stringify_value(item.get("arguments", {})),
+                    },
                 }
             )
             continue
@@ -252,6 +301,7 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
 
         role = item.get("role")
         if item_type == "message" or role:
+            flush_pending_function_calls()
             if role not in {"system", "developer", "user", "assistant", "tool"}:
                 raise UnsupportedFeatureError(f"Unsupported role `{role}`.")
             upstream_role = "system" if role == "developer" else role
@@ -270,14 +320,58 @@ def convert_input_to_messages(input_value: Any) -> list[dict[str, Any]]:
 
         raise UnsupportedFeatureError(f"Unsupported input item type `{item_type}`.")
 
+    flush_pending_function_calls()
     return messages
+
+
+def build_input_items(input_value: Any) -> list[dict[str, Any]]:
+    if input_value is None:
+        return []
+    if isinstance(input_value, str):
+        items = [{"type": "message", "role": "user", "content": input_value}]
+    elif isinstance(input_value, dict):
+        items = [input_value]
+    elif isinstance(input_value, list):
+        items = input_value
+    else:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        stored = deepcopy(item)
+        stored.setdefault("id", make_id("item"))
+        if "type" not in stored and "role" in stored:
+            stored["type"] = "message"
+        normalized.append(stored)
+    return normalized
+
+
+def input_contains_image(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(input_contains_image(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") == "computer_call_output":
+        return False
+    part_type = value.get("type")
+    if part_type in {"input_image", "image_url"}:
+        return True
+    for key in ("content", "input"):
+        if key in value and input_contains_image(value[key]):
+            return True
+    return False
 
 
 def extract_message_content(value: Any, source: str) -> str | list[dict[str, Any]]:
     if isinstance(value, list):
         parts = [convert_content_part(part, source) for part in value]
         if all(part["type"] == "text" for part in parts):
-            return "".join(str(part.get("text", "")) for part in parts)
+            texts = [str(part.get("text", "")) for part in parts if str(part.get("text", ""))]
+            if any(text.startswith("[input_file ") for text in texts):
+                return "\n".join(texts)
+            return "".join(texts)
         return parts
     return extract_text(value, source=source)
 
@@ -309,8 +403,31 @@ def convert_content_part(part: Any, source: str) -> dict[str, Any]:
             return {"type": "input_audio", "input_audio": deepcopy(audio)}
         return {"type": "text", "text": describe_file_like_part("input_audio", part)}
     if part_type in {"input_file", "file"}:
-        return {"type": "text", "text": describe_file_like_part("input_file", part)}
+        return {"type": "text", "text": describe_input_file_part(part)}
     raise UnsupportedFeatureError(f"Unsupported content part type `{part_type}` in {source}.")
+
+
+def describe_input_file_part(part: dict[str, Any]) -> str:
+    filename = str(part.get("filename") or part.get("file_id") or "inline-file")
+    file_data = part.get("file_data")
+    if isinstance(file_data, str):
+        decoded = decode_inline_text_file(file_data)
+        if decoded is not None:
+            return f"[input_file {filename}]\n{decoded}"
+    return describe_file_like_part("input_file", part)
+
+
+def decode_inline_text_file(file_data: str) -> str | None:
+    payload = file_data.strip()
+    if "," in payload and payload.lower().startswith("data:"):
+        payload = payload.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except ValueError:
+        return None
+    if b"\x00" in raw[:4096]:
+        return None
+    return raw.decode("utf-8", errors="replace")
 
 
 def describe_file_like_part(label: str, part: dict[str, Any]) -> str:
@@ -388,20 +505,31 @@ def convert_tool(tool: dict[str, Any]) -> list[dict[str, Any]]:
         raise UnsupportedFeatureError(
             f"Unsupported tool type `{tool_type}`. Only `function` tools are supported."
         )
+    return [normalize_function_tool(tool)]
+
+
+def normalize_function_tool(tool: dict[str, Any]) -> dict[str, Any]:
     if "function" in tool:
-        return [deepcopy(tool)]
-    name = tool.get("name")
+        raw_function = tool.get("function") or {}
+        if not isinstance(raw_function, dict):
+            raise UnsupportedFeatureError("Function tools need a valid `function` object.")
+        name = raw_function.get("name")
+        description = raw_function.get("description")
+        parameters = raw_function.get("parameters")
+    else:
+        name = tool.get("name")
+        description = tool.get("description")
+        parameters = tool.get("parameters")
+
     if not name:
         raise UnsupportedFeatureError("Function tools need a `name`.")
     function: dict[str, Any] = {
-        "name": name,
-        "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+        "name": str(name),
+        "parameters": parameters if isinstance(parameters, dict) else {"type": "object", "properties": {}},
     }
-    if tool.get("description"):
-        function["description"] = tool["description"]
-    if "strict" in tool:
-        function["strict"] = tool["strict"]
-    return [{"type": "function", "function": function}]
+    if description:
+        function["description"] = str(description)
+    return {"type": "function", "function": function}
 
 
 def flatten_namespace_tools(tool: dict[str, Any]) -> list[dict[str, Any]]:
@@ -477,6 +605,9 @@ def build_response_from_upstream(
     payload: dict[str, Any],
     upstream_response: dict[str, Any],
     response_id: str,
+    hosted_output_items: list[dict[str, Any]] | None = None,
+    hosted_annotations: list[dict[str, Any]] | None = None,
+    protocol_report: ProtocolReport | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     choice = first_choice(upstream_response)
     message = choice.get("message") or {}
@@ -491,7 +622,11 @@ def build_response_from_upstream(
         payload=payload,
         response_id=response_id,
         assistant_text=assistant_text,
+        reasoning_content=reasoning_content,
         tool_calls=tool_calls,
+        prefix_output_items=hosted_output_items,
+        annotations=hosted_annotations,
+        protocol_report=protocol_report,
         usage=usage,
         finish_reason=finish_reason,
         created_at=upstream_response.get("created") or int(time.time()),
@@ -508,8 +643,19 @@ def build_response_object(
     finish_reason: str | None,
     created_at: int,
     message_id: str | None = None,
+    reasoning_content: str = "",
+    prefix_output_items: list[dict[str, Any]] | None = None,
+    annotations: list[dict[str, Any]] | None = None,
+    protocol_report: ProtocolReport | None = None,
 ) -> dict[str, Any]:
-    output_items = build_output_items(assistant_text, tool_calls, message_id=message_id)
+    output_items = build_output_items(
+        assistant_text,
+        tool_calls,
+        message_id=message_id,
+        reasoning_content=reasoning_content,
+        prefix_output_items=prefix_output_items,
+        annotations=annotations,
+    )
     status = "completed"
     incomplete_details = None
     if finish_reason == "length":
@@ -526,6 +672,7 @@ def build_response_object(
         output_text=assistant_text,
         usage=usage,
         incomplete_details=incomplete_details,
+        protocol_report=protocol_report,
     )
 
 
@@ -539,12 +686,14 @@ def build_response_envelope(
     output_text: str,
     usage: dict[str, Any] | None,
     incomplete_details: dict[str, Any] | None,
+    protocol_report: ProtocolReport | None = None,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    metadata = build_metadata_payload(payload, protocol_report)
     return {
         "id": response_id,
         "object": "response",
-        "background": False,
+        "background": bool(payload.get("background", False)),
         "created_at": created_at,
         "completed_at": completed_at,
         "status": status,
@@ -565,12 +714,12 @@ def build_response_envelope(
         "text": normalize_text_payload(payload),
         "tool_choice": deepcopy(payload.get("tool_choice", "auto")),
         "tools": deepcopy(payload.get("tools", [])),
-        "top_logprobs": payload.get("top_logprobs", 0),
+        "top_logprobs": 0,
         "top_p": payload.get("top_p", 1.0),
-        "truncation": payload.get("truncation", "disabled"),
+        "truncation": "disabled",
         "usage": usage,
         "user": payload.get("user"),
-        "metadata": deepcopy(payload.get("metadata") or {}),
+        "metadata": metadata,
     }
 
 
@@ -578,8 +727,13 @@ def build_output_items(
     assistant_text: str,
     tool_calls: list[dict[str, Any]],
     message_id: str | None = None,
+    reasoning_content: str = "",
+    prefix_output_items: list[dict[str, Any]] | None = None,
+    annotations: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
+    output: list[dict[str, Any]] = deepcopy(prefix_output_items or [])
+    if reasoning_content:
+        output.append(build_reasoning_item(reasoning_content))
     if assistant_text or not tool_calls:
         output.append(
             {
@@ -591,7 +745,7 @@ def build_output_items(
                     {
                         "type": "output_text",
                         "text": assistant_text,
-                        "annotations": [],
+                        "annotations": build_output_annotations(assistant_text, annotations),
                     }
                 ],
             }
@@ -610,6 +764,37 @@ def build_output_items(
     return output
 
 
+def build_reasoning_item(reasoning_content: str, item_id: str | None = None, status: str = "completed") -> dict[str, Any]:
+    return {
+        "id": item_id or make_id("rs"),
+        "type": "reasoning",
+        "status": status,
+        "summary": [
+            {
+                "type": "summary_text",
+                "text": reasoning_content,
+            }
+        ],
+    }
+
+
+def build_output_annotations(assistant_text: str, annotations: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for annotation in annotations or []:
+        item = deepcopy(annotation)
+        item.setdefault("start_index", 0)
+        item.setdefault("end_index", len(assistant_text))
+        normalized.append(item)
+    return normalized
+
+
+def build_metadata_payload(payload: dict[str, Any], protocol_report: ProtocolReport | None) -> dict[str, Any]:
+    metadata = deepcopy(payload.get("metadata") or {})
+    if protocol_report and protocol_report.has_compatibility_notes:
+        metadata.setdefault("response_proxy", {}).update(protocol_report.to_metadata())
+    return metadata
+
+
 def build_history_output(
     assistant_text: str,
     tool_calls: list[dict[str, Any]],
@@ -621,6 +806,106 @@ def build_history_output(
     if tool_calls:
         message["tool_calls"] = deepcopy(tool_calls)
     return [message]
+
+
+def append_conversation_history(
+    history: list[dict[str, Any]],
+    input_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not history:
+        return deepcopy(input_messages)
+    if not input_messages:
+        return deepcopy(history)
+
+    overlap_length = find_history_suffix_input_prefix_overlap(history, input_messages)
+    if overlap_length == 0:
+        merged = deepcopy(history) + deepcopy(input_messages)
+    else:
+        merged = deepcopy(history[:-overlap_length])
+        for offset in range(overlap_length):
+            merged.append(merge_history_message(history[-overlap_length + offset], input_messages[offset]))
+        merged.extend(deepcopy(input_messages[overlap_length:]))
+    return restore_reasoning_content(history, merged)
+
+
+def find_history_suffix_input_prefix_overlap(
+    history: list[dict[str, Any]],
+    input_messages: list[dict[str, Any]],
+) -> int:
+    max_overlap = min(len(history), len(input_messages))
+    for overlap_length in range(max_overlap, 0, -1):
+        if all(
+            messages_match_for_history(history[-overlap_length + offset], input_messages[offset])
+            for offset in range(overlap_length)
+        ):
+            return overlap_length
+    return 0
+
+
+def sanitize_chat_message_sequence(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = deepcopy(messages[index])
+        role = message.get("role")
+
+        if role == "tool":
+            index += 1
+            continue
+
+        if role == "assistant" and message.get("tool_calls"):
+            expected_ids = tool_call_ids(message.get("tool_calls"))
+            if not expected_ids:
+                message.pop("tool_calls", None)
+                if message.get("content"):
+                    sanitized.append(message)
+                index += 1
+                continue
+
+            tool_messages: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            scan_index = index + 1
+            while scan_index < len(messages) and messages[scan_index].get("role") == "tool":
+                tool_message = deepcopy(messages[scan_index])
+                tool_call_id = str(tool_message.get("tool_call_id") or tool_message.get("call_id") or "")
+                if tool_call_id in expected_ids and tool_call_id not in seen_ids:
+                    tool_messages.append(tool_message)
+                    seen_ids.add(tool_call_id)
+                scan_index += 1
+
+            if seen_ids == set(expected_ids):
+                sanitized.append(message)
+                sanitized.extend(tool_messages)
+            else:
+                message.pop("tool_calls", None)
+                if message.get("content"):
+                    sanitized.append(message)
+            index = scan_index
+            continue
+
+        sanitized.append(message)
+        index += 1
+
+    return sanitized
+
+
+def hoist_system_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    system_messages = [deepcopy(message) for message in messages if message.get("role") == "system"]
+    non_system_messages = [deepcopy(message) for message in messages if message.get("role") != "system"]
+    return system_messages + non_system_messages
+
+
+def tool_call_ids(tool_calls: Any) -> list[str]:
+    if not isinstance(tool_calls, list):
+        return []
+    ids: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        tool_call_id = tool_call.get("id") or tool_call.get("call_id")
+        if tool_call_id:
+            ids.append(str(tool_call_id))
+    return ids
 
 
 def merge_conversation_history(
@@ -772,33 +1057,112 @@ def extract_text_tool_call_markers(text: str, payload: dict[str, Any]) -> tuple[
         parsed = parse_json_value(match.group(1))
         if not isinstance(parsed, dict):
             continue
-        name = parsed.get("name")
-        if not isinstance(name, str) or not name:
-            function = parsed.get("function")
-            if isinstance(function, dict):
-                name = function.get("name")
-        if not isinstance(name, str) or name not in tool_schemas:
-            continue
+        tool_call = build_marker_tool_call(parsed, tool_schemas)
+        if tool_call:
+            tool_calls.append(tool_call)
 
-        arguments = parsed.get("arguments", {})
-        if not isinstance(arguments, str):
-            arguments = stringify_value(arguments)
-        normalized_name, normalized_arguments = normalize_tool_call_output(name, arguments, tool_schemas)
-        tool_calls.append(
-            {
-                "id": str(parsed.get("id") or parsed.get("call_id") or make_id("call")),
-                "type": "function",
-                "function": {
-                    "name": normalized_name,
-                    "arguments": normalized_arguments,
-                },
-            }
-        )
+    for match in TOOL_CALL_XML_RE.finditer(text):
+        parsed = {
+            "name": match.group(1),
+            "arguments": parse_xml_tool_call_arguments(match.group(2)),
+        }
+        tool_call = build_marker_tool_call(parsed, tool_schemas)
+        if tool_call:
+            tool_calls.append(tool_call)
 
     if not tool_calls:
         return text, []
-    cleaned_text = TOOL_CALL_MARKER_RE.sub("", text).strip()
-    return cleaned_text, tool_calls
+    return "", tool_calls
+
+
+def build_marker_tool_call(
+    parsed: dict[str, Any],
+    tool_schemas: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    name = parsed.get("name")
+    if not isinstance(name, str) or not name:
+        function = parsed.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+    if not isinstance(name, str):
+        return None
+
+    arguments = parsed.get("arguments", {})
+    if not isinstance(arguments, str):
+        arguments = stringify_value(arguments)
+
+    translated = translate_hallucinated_apply_patch(name, arguments, tool_schemas)
+    if translated is None:
+        translated = translate_hallucinated_read_file(name, arguments, tool_schemas)
+    if translated is not None:
+        translated_name, translated_arguments = translated
+        return {
+            "id": str(parsed.get("id") or parsed.get("call_id") or make_id("call")),
+            "type": "function",
+            "function": {
+                "name": translated_name,
+                "arguments": translated_arguments,
+            },
+        }
+
+    name = resolve_tool_schema_name(name, tool_schemas)
+    if name is None:
+        return None
+
+    normalized_name, normalized_arguments = normalize_tool_call_output(name, arguments, tool_schemas)
+    return {
+        "id": str(parsed.get("id") or parsed.get("call_id") or make_id("call")),
+        "type": "function",
+        "function": {
+            "name": normalized_name,
+            "arguments": normalized_arguments,
+        },
+    }
+
+
+def resolve_tool_schema_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str | None:
+    if name in tool_schemas:
+        return name
+    aliases = {
+        "shell": ("shell_command",),
+        "shell_command": ("shell",),
+    }
+    for alias in aliases.get(name, ()):
+        if alias in tool_schemas:
+            return alias
+    return None
+
+
+def parse_xml_tool_call_arguments(content: str) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    for match in TOOL_CALL_XML_PARAMETER_RE.finditer(content):
+        key = match.group(1)
+        value = html.unescape(match.group(2)).strip()
+        arguments[key] = parse_relaxed_parameter_value(value)
+    return arguments
+
+
+def parse_relaxed_parameter_value(value: str) -> Any:
+    parsed = parse_json_value(value)
+    if parsed is not None:
+        return parsed
+    relaxed_array = parse_relaxed_string_array(value)
+    if relaxed_array is not None:
+        return relaxed_array
+    try:
+        return ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return value
+
+
+def parse_relaxed_string_array(value: str) -> list[str] | None:
+    stripped = value.strip()
+    if not (stripped.startswith("[") and stripped.endswith("]")):
+        return None
+    items = re.findall(r'"([^"]*)"|\'([^\']*)\'', stripped[1:-1])
+    if not items:
+        return None
+    return [double_quoted if double_quoted else single_quoted for double_quoted, single_quoted in items]
 
 
 def build_tool_schema_index(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -829,6 +1193,8 @@ def normalize_tool_call_output(
     tool_schemas: dict[str, dict[str, Any]],
 ) -> tuple[str, str]:
     translated = translate_hallucinated_apply_patch(tool_name, arguments, tool_schemas)
+    if translated is None:
+        translated = translate_hallucinated_read_file(tool_name, arguments, tool_schemas)
     if translated is not None:
         return translated
 
@@ -907,6 +1273,11 @@ def coerce_value_to_schema(value: Any, schema: dict[str, Any] | None) -> Any:
         if normalized == "false":
             return False
 
+    if schema_type == "string" and isinstance(value, list) and all(isinstance(item, str) for item in value):
+        if platform.system().lower().startswith("win"):
+            return subprocess.list2cmdline(value)
+        return shlex.join(value)
+
     return value
 
 
@@ -917,12 +1288,27 @@ def translate_hallucinated_apply_patch(
 ) -> tuple[str, str] | None:
     if tool_name != "apply_patch":
         return None
-    if "shell" not in tool_schemas:
+    shell_tool_name = resolve_shell_tool_name(tool_schemas)
+    if shell_tool_name is None:
         return None
 
     parsed_arguments = parse_json_value(arguments)
     if not isinstance(parsed_arguments, dict):
         return None
+
+    patch_text = extract_apply_patch_text(parsed_arguments)
+    if patch_text:
+        simple_write = parse_simple_apply_patch_write(patch_text)
+        if simple_write is not None:
+            path, content = simple_write
+            shell_arguments = {
+                "command": [
+                    "powershell.exe",
+                    "-Command",
+                    build_powershell_write_file_command(path, content),
+                ]
+            }
+            return shell_tool_name, serialize_tool_arguments(shell_tool_name, shell_arguments, tool_schemas)
 
     patch_payload = parsed_arguments.get("json", parsed_arguments)
     if not isinstance(patch_payload, dict):
@@ -943,7 +1329,115 @@ def translate_hallucinated_apply_patch(
             build_powershell_write_file_command(path, content),
         ]
     }
-    return "shell", json.dumps(shell_arguments, ensure_ascii=False)
+    return shell_tool_name, serialize_tool_arguments(shell_tool_name, shell_arguments, tool_schemas)
+
+
+def translate_hallucinated_read_file(
+    tool_name: str,
+    arguments: str,
+    tool_schemas: dict[str, dict[str, Any]],
+) -> tuple[str, str] | None:
+    if tool_name not in {"read", "read_file", "view", "cat", "open_file"}:
+        return None
+    shell_tool_name = resolve_shell_tool_name(tool_schemas)
+    if shell_tool_name is None:
+        return None
+
+    parsed_arguments = parse_json_value(arguments)
+    if not isinstance(parsed_arguments, dict):
+        return None
+
+    path = first_string_value(parsed_arguments, "path", "file_path", "filename", "target")
+    if not path:
+        return None
+
+    shell_arguments = {"command": build_read_file_command(path)}
+    return shell_tool_name, serialize_tool_arguments(shell_tool_name, shell_arguments, tool_schemas)
+
+
+def first_string_value(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def resolve_shell_tool_name(tool_schemas: dict[str, dict[str, Any]]) -> str | None:
+    if "shell" in tool_schemas:
+        return "shell"
+    if "shell_command" in tool_schemas:
+        return "shell_command"
+    return None
+
+
+def serialize_tool_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+    tool_schemas: dict[str, dict[str, Any]],
+) -> str:
+    schema = (tool_schemas.get(tool_name) or {}).get("parameters")
+    return json.dumps(coerce_value_to_schema(arguments, schema), ensure_ascii=False)
+
+
+def build_read_file_command(path: str) -> list[str]:
+    if platform.system().lower().startswith("win"):
+        escaped_path = path.replace("'", "''")
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            f"Get-Content -Raw -LiteralPath '{escaped_path}'",
+        ]
+    return ["cat", "--", path]
+
+
+def extract_apply_patch_text(parsed_arguments: dict[str, Any]) -> str | None:
+    command = parsed_arguments.get("command")
+    if isinstance(command, list) and len(command) >= 2 and str(command[0]).strip() == "apply_patch":
+        return str(command[1])
+    if isinstance(command, str) and "*** Begin Patch" in command:
+        return command[command.find("*** Begin Patch") :]
+    for key in ("patch", "input", "content"):
+        value = parsed_arguments.get(key)
+        if isinstance(value, str) and "*** Begin Patch" in value:
+            return value[value.find("*** Begin Patch") :]
+    return None
+
+
+def parse_simple_apply_patch_write(patch_text: str) -> tuple[str, str] | None:
+    if "*** Begin Patch\\n" in patch_text:
+        patch_text = patch_text.replace("\\r\\n", "\n").replace("\\n", "\n")
+    lines = patch_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "*** Begin Patch":
+        return None
+    if not any(line.strip() == "*** End Patch" for line in lines):
+        return None
+
+    file_path: str | None = None
+    content_lines: list[str] = []
+    in_file = False
+    for raw_line in lines[1:]:
+        line = raw_line.rstrip("\n")
+        if line.startswith("*** Add File: ") or line.startswith("*** Update File: "):
+            if file_path is not None:
+                return None
+            file_path = line.split(": ", 1)[1].strip()
+            in_file = True
+            continue
+        if line.startswith("*** End Patch"):
+            break
+        if line.startswith("*** "):
+            return None
+        if not in_file:
+            continue
+        if not line.startswith("+"):
+            return None
+        content_lines.append(line[1:])
+
+    if not file_path:
+        return None
+    return file_path, "\n".join(content_lines)
 
 
 def build_powershell_write_file_command(path: str, content: str) -> str:
@@ -967,11 +1461,15 @@ def convert_usage(value: Any) -> dict[str, int] | None:
     prompt_tokens = int(value.get("prompt_tokens", 0))
     completion_tokens = int(value.get("completion_tokens", 0))
     total_tokens = int(value.get("total_tokens", prompt_tokens + completion_tokens))
+    completion_details = value.get("completion_tokens_details")
+    reasoning_tokens = 0
+    if isinstance(completion_details, dict):
+        reasoning_tokens = int(completion_details.get("reasoning_tokens", 0))
     return {
         "input_tokens": prompt_tokens,
         "input_tokens_details": {"cached_tokens": 0},
         "output_tokens": completion_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "total_tokens": total_tokens,
     }
 
@@ -1017,9 +1515,14 @@ class StreamToolCall:
 class StreamAccumulator:
     payload: dict[str, Any]
     response_id: str
+    hosted_output_items: list[dict[str, Any]] = field(default_factory=list)
+    hosted_annotations: list[dict[str, Any]] = field(default_factory=list)
+    protocol_report: ProtocolReport | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
     message_id: str = field(default_factory=lambda: make_id("msg"))
+    reasoning_id: str = field(default_factory=lambda: make_id("rs"))
     text_started: bool = False
+    reasoning_started: bool = False
     text_chunks: list[str] = field(default_factory=list)
     reasoning_chunks: list[str] = field(default_factory=list)
     tool_calls: dict[int, StreamToolCall] = field(default_factory=dict)
@@ -1027,9 +1530,25 @@ class StreamAccumulator:
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     sequence_number: int = 0
+    message_output_index: int | None = None
 
     def should_buffer_text(self) -> bool:
         return bool(build_tool_schema_index(self.payload))
+
+    def reasoning_output_index(self) -> int:
+        return len(self.hosted_output_items)
+
+    def current_output_prefix_count(self) -> int:
+        return len(self.hosted_output_items) + (1 if self.reasoning_started else 0)
+
+    def get_message_output_index(self) -> int:
+        if self.message_output_index is None:
+            self.message_output_index = self.current_output_prefix_count()
+        return self.message_output_index
+
+    def next_tool_output_index(self) -> int:
+        message_reserved = self.message_output_index is not None or bool(self.text_chunks)
+        return self.current_output_prefix_count() + (1 if message_reserved else 0) + len(self.tool_call_order)
 
     def initial_events(self) -> list[bytes]:
         response_stub = build_response_envelope(
@@ -1042,6 +1561,7 @@ class StreamAccumulator:
             output_text="",
             usage=None,
             incomplete_details=None,
+            protocol_report=self.protocol_report,
         )
         return [
             self.emit(
@@ -1053,6 +1573,21 @@ class StreamAccumulator:
                 {"response": response_stub},
             ),
         ]
+
+    def in_progress_event(self) -> bytes:
+        response_stub = build_response_envelope(
+            payload=self.payload,
+            response_id=self.response_id,
+            created_at=self.created_at,
+            completed_at=None,
+            status="in_progress",
+            output=[],
+            output_text="",
+            usage=None,
+            incomplete_details=None,
+            protocol_report=self.protocol_report,
+        )
+        return self.emit("response.in_progress", {"response": response_stub})
 
     def consume_chunk(self, chunk: dict[str, Any]) -> list[bytes]:
         events: list[bytes] = []
@@ -1072,6 +1607,28 @@ class StreamAccumulator:
         reasoning_content = delta.get("reasoning_content")
         if isinstance(reasoning_content, str) and reasoning_content:
             self.reasoning_chunks.append(reasoning_content)
+            if not self.reasoning_started:
+                self.reasoning_started = True
+                events.append(
+                    self.emit(
+                        "response.output_item.added",
+                        {
+                            "output_index": self.reasoning_output_index(),
+                            "item": build_reasoning_item("", item_id=self.reasoning_id, status="in_progress"),
+                        },
+                    )
+                )
+            events.append(
+                self.emit(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "item_id": self.reasoning_id,
+                        "output_index": self.reasoning_output_index(),
+                        "summary_index": 0,
+                        "delta": reasoning_content,
+                    },
+                )
+            )
         if isinstance(content, str) and content:
             self.text_chunks.append(content)
             if self.should_buffer_text():
@@ -1079,11 +1636,12 @@ class StreamAccumulator:
                 return events
             if not self.text_started:
                 self.text_started = True
+                output_index = self.get_message_output_index()
                 events.append(
                     self.emit(
                         "response.output_item.added",
                         {
-                            "output_index": 0,
+                            "output_index": output_index,
                             "item": self.build_stream_message_item(status="in_progress", text=""),
                         },
                     )
@@ -1093,7 +1651,7 @@ class StreamAccumulator:
                         "response.content_part.added",
                         {
                             "item_id": self.message_id,
-                            "output_index": 0,
+                            "output_index": output_index,
                             "content_index": 0,
                             "part": self.build_stream_text_part(""),
                         },
@@ -1102,11 +1660,11 @@ class StreamAccumulator:
             events.append(
                 self.emit(
                     "response.output_text.delta",
-                    {
-                        "item_id": self.message_id,
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": content,
+                        {
+                            "item_id": self.message_id,
+                            "output_index": self.get_message_output_index(),
+                            "content_index": 0,
+                            "delta": content,
                         "logprobs": [],
                     },
                 )
@@ -1121,7 +1679,7 @@ class StreamAccumulator:
                 tool_call = self.tool_calls.get(index)
                 function = raw_tool_call.get("function") or {}
                 if tool_call is None:
-                    tool_output_index = len(self.tool_call_order) + (1 if self.text_started else 0)
+                    tool_output_index = self.next_tool_output_index()
                     tool_call = StreamToolCall(
                         id=raw_tool_call.get("id") or make_id("call"),
                         output_index=tool_output_index,
@@ -1191,14 +1749,40 @@ class StreamAccumulator:
             tool_added_emitted = [False for _ in normalized_tool_calls]
 
         has_message_item = bool(assistant_text or not normalized_tool_calls)
+        if reasoning_content and self.reasoning_started:
+            events.append(
+                self.emit(
+                    "response.reasoning_summary_text.done",
+                    {
+                        "item_id": self.reasoning_id,
+                        "output_index": self.reasoning_output_index(),
+                        "summary_index": 0,
+                        "text": reasoning_content,
+                    },
+                )
+            )
+            events.append(
+                self.emit(
+                    "response.output_item.done",
+                    {
+                        "output_index": self.reasoning_output_index(),
+                        "item": build_reasoning_item(
+                            reasoning_content,
+                            item_id=self.reasoning_id,
+                            status="completed",
+                        ),
+                    },
+                )
+            )
         if has_message_item:
+            message_output_index = self.get_message_output_index()
             stream_message_item = self.build_stream_message_item(status="completed", text=assistant_text)
             if not self.text_started:
                 events.append(
                     self.emit(
                         "response.output_item.added",
                         {
-                            "output_index": 0,
+                            "output_index": message_output_index,
                             "item": self.build_stream_message_item(status="in_progress", text=""),
                         },
                     )
@@ -1208,7 +1792,7 @@ class StreamAccumulator:
                         "response.content_part.added",
                         {
                             "item_id": self.message_id,
-                            "output_index": 0,
+                            "output_index": message_output_index,
                             "content_index": 0,
                             "part": self.build_stream_text_part(""),
                         },
@@ -1219,7 +1803,7 @@ class StreamAccumulator:
                     "response.output_text.done",
                     {
                         "item_id": self.message_id,
-                        "output_index": 0,
+                        "output_index": message_output_index,
                         "content_index": 0,
                         "text": assistant_text,
                         "logprobs": [],
@@ -1231,7 +1815,7 @@ class StreamAccumulator:
                     "response.content_part.done",
                     {
                         "item_id": self.message_id,
-                        "output_index": 0,
+                        "output_index": message_output_index,
                         "content_index": 0,
                         "part": self.build_stream_text_part(assistant_text),
                     },
@@ -1241,14 +1825,18 @@ class StreamAccumulator:
                 self.emit(
                     "response.output_item.done",
                     {
-                        "output_index": 0,
+                        "output_index": message_output_index,
                         "item": stream_message_item,
                     },
                 )
             )
 
         for tool_index, tool_call in enumerate(normalized_tool_calls):
-            output_index = tool_index + (1 if has_message_item else 0)
+            output_index = self.final_tool_output_index(
+                tool_index,
+                has_message_item,
+                tool_added_emitted[tool_index],
+            )
             if not tool_added_emitted[tool_index]:
                 events.append(
                     self.emit(
@@ -1304,6 +1892,10 @@ class StreamAccumulator:
             finish_reason=self.finish_reason,
             created_at=self.created_at,
             message_id=self.message_id if has_message_item else None,
+            reasoning_content=reasoning_content,
+            prefix_output_items=self.hosted_output_items,
+            annotations=self.hosted_annotations,
+            protocol_report=self.protocol_report,
         )
         history_output = build_history_output(
             assistant_text,
@@ -1311,6 +1903,17 @@ class StreamAccumulator:
             reasoning_content=reasoning_content,
         )
         return events, response, history_output
+
+    def final_tool_output_index(self, tool_index: int, has_message_item: bool, already_emitted: bool) -> int:
+        if already_emitted and tool_index < len(self.tool_call_order):
+            raw_tool_call = self.tool_calls[self.tool_call_order[tool_index]]
+            return raw_tool_call.output_index
+        return (
+            len(self.hosted_output_items)
+            + (1 if self.reasoning_started else 0)
+            + (1 if has_message_item else 0)
+            + tool_index
+        )
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> bytes:
         body = {"type": event_type, **payload, "sequence_number": self.sequence_number}

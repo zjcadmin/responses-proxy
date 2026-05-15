@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -20,13 +21,17 @@ from app.translator import (
     UnsupportedFeatureError,
     build_error,
     build_response_envelope,
+    build_tool_intent_retry_payload,
+    build_tool_intent_retry_payload_for_response,
     make_id,
     prepare_chat_request,
     build_response_from_upstream,
+    should_retry_tool_intent_response,
 )
 from app.upstream import UpstreamChatClient, UpstreamHTTPError
 
-STREAM_KEEPALIVE_SECONDS = 10.0
+STREAM_KEEPALIVE_SECONDS = 1.0
+MAX_TOOL_INTENT_RETRIES = 1
 
 
 def create_app(
@@ -152,22 +157,13 @@ def create_app(
 
         if payload.get("stream"):
             response_id = make_id("resp")
-            try:
-                upstream_stream = await upstream.open_stream(prepared.upstream_payload, upstream_token)
-            except UpstreamHTTPError as exc:
-                return JSONResponse(status_code=normalize_upstream_status_code(exc), content=normalize_upstream_error(exc))
-            except httpx.HTTPError as exc:
-                return error_response(
-                    502,
-                    f"Failed to connect to upstream stream: {exc}",
-                    error_type="upstream_error",
-                )
             return StreamingResponse(
                 stream_response(
                     payload=payload,
                     prepared=prepared,
                     response_id=response_id,
-                    upstream_stream=upstream_stream,
+                    upstream=upstream,
+                    upstream_token=upstream_token,
                     store=store,
                     inflight=inflight,
                     conversation_history=conversation_history,
@@ -181,7 +177,12 @@ def create_app(
             )
 
         try:
-            upstream_response = await upstream.create_completion(prepared.upstream_payload, upstream_token)
+            upstream_response = await create_completion_with_tool_intent_retry(
+                payload=payload,
+                upstream_payload=prepared.upstream_payload,
+                upstream=upstream,
+                upstream_token=upstream_token,
+            )
             response_id = make_id("resp")
             response, history_output = build_response_from_upstream(
                 payload,
@@ -305,11 +306,26 @@ def resolve_conversation_key(payload: dict[str, Any]) -> str | None:
     return None
 
 
+async def create_completion_with_tool_intent_retry(
+    *,
+    payload: dict[str, Any],
+    upstream_payload: dict[str, Any],
+    upstream: UpstreamChatClient,
+    upstream_token: str,
+) -> dict[str, Any]:
+    upstream_response = await upstream.create_completion(upstream_payload, upstream_token)
+    if should_retry_tool_intent_response(payload, upstream_response):
+        retry_payload = build_tool_intent_retry_payload_for_response(upstream_payload, upstream_response)
+        upstream_response = await upstream.create_completion(retry_payload, upstream_token)
+    return upstream_response
+
+
 async def stream_response(
     payload: dict[str, Any],
     prepared: PreparedChatRequest,
     response_id: str,
-    upstream_stream,
+    upstream: UpstreamChatClient,
+    upstream_token: str,
     store: ConversationStore,
     inflight: "InFlightRegistry",
     conversation_history: list[dict[str, Any]],
@@ -327,43 +343,86 @@ async def stream_response(
     for event in accumulator.initial_events():
         yield event
 
+    active_upstream_payload = prepared.upstream_payload
+    retry_count = 0
     try:
-        upstream_events = upstream_stream.iter_events().__aiter__()
-        next_event_task = asyncio.create_task(upstream_events.__anext__())
         while True:
-            done, _ = await asyncio.wait({next_event_task}, timeout=STREAM_KEEPALIVE_SECONDS)
-            if not done:
+            upstream_stream = None
+            next_event_task = None
+            open_stream_task = asyncio.create_task(upstream.open_stream(active_upstream_payload, upstream_token))
+            try:
+                while True:
+                    done, _ = await asyncio.wait({open_stream_task}, timeout=STREAM_KEEPALIVE_SECONDS)
+                    if done:
+                        upstream_stream = open_stream_task.result()
+                        break
+                    yield accumulator.in_progress_event()
+
+                upstream_events = upstream_stream.iter_events().__aiter__()
+                next_event_task = asyncio.create_task(upstream_events.__anext__())
+                while True:
+                    done, _ = await asyncio.wait({next_event_task}, timeout=STREAM_KEEPALIVE_SECONDS)
+                    if not done:
+                        yield accumulator.in_progress_event()
+                        continue
+                    try:
+                        raw_event = next_event_task.result()
+                    except StopAsyncIteration:
+                        break
+                    next_event_task = asyncio.create_task(upstream_events.__anext__())
+                    if raw_event == "[DONE]":
+                        break
+                    chunk = json.loads(raw_event)
+                    if is_upstream_stream_error_payload(chunk):
+                        raise UpstreamHTTPError(502, chunk)
+                    for event in accumulator.consume_chunk(chunk):
+                        yield event
+            finally:
+                if not open_stream_task.done():
+                    open_stream_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await open_stream_task
+                if next_event_task is not None and not next_event_task.done():
+                    next_event_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await next_event_task
+                if upstream_stream is not None:
+                    await upstream_stream.aclose()
+
+            if retry_count < MAX_TOOL_INTENT_RETRIES and accumulator.should_retry_tool_intent():
+                intent_text = accumulator.reset_for_tool_intent_retry()
+                active_upstream_payload = build_tool_intent_retry_payload(active_upstream_payload, intent_text)
+                retry_count += 1
                 yield accumulator.in_progress_event()
                 continue
-            try:
-                raw_event = next_event_task.result()
-            except StopAsyncIteration:
-                break
-            next_event_task = asyncio.create_task(upstream_events.__anext__())
-            if raw_event == "[DONE]":
-                break
-            chunk = json.loads(raw_event)
-            for event in accumulator.consume_chunk(chunk):
-                yield event
+            break
     except json.JSONDecodeError as exc:
-        yield accumulator.failed_event(build_error(f"Failed to decode upstream stream chunk: {exc.msg}")["error"])
+        error = build_error(f"Failed to decode upstream stream chunk: {exc.msg}")["error"]
+        store_failed_stream_response(payload, prepared, response_id, store, error)
+        yield accumulator.failed_event(error)
         return
     except UnsupportedFeatureError as exc:
-        yield accumulator.failed_event(build_error(str(exc))["error"])
+        error = build_error(str(exc))["error"]
+        store_failed_stream_response(payload, prepared, response_id, store, error)
+        yield accumulator.failed_event(error)
         return
     except UpstreamHTTPError as exc:
-        yield accumulator.failed_event(normalize_upstream_error(exc)["error"])
+        error = normalize_upstream_error(exc)["error"]
+        store_failed_stream_response(payload, prepared, response_id, store, error)
+        yield accumulator.failed_event(error)
+        return
+    except httpx.HTTPError as exc:
+        error = build_error(f"Failed to connect to upstream stream: {exc}", error_type="upstream_error")["error"]
+        store_failed_stream_response(payload, prepared, response_id, store, error)
+        yield accumulator.failed_event(error)
         return
     except Exception as exc:
-        yield accumulator.failed_event(
-            build_error(f"Proxy stream error: {exc}", error_type="internal_error")["error"]
-        )
+        error = build_error(f"Proxy stream error: {exc}", error_type="internal_error")["error"]
+        store_failed_stream_response(payload, prepared, response_id, store, error)
+        yield accumulator.failed_event(error)
         return
     finally:
-        if "next_event_task" in locals() and not next_event_task.done():
-            next_event_task.cancel()
         inflight.unregister(response_id)
-        await upstream_stream.aclose()
 
     final_events, response, history_output = accumulator.finalize()
     for event in final_events:
@@ -423,6 +482,10 @@ def is_upstream_image_input_unsupported(exc: UpstreamHTTPError) -> bool:
     )
 
 
+def is_upstream_stream_error_payload(chunk: dict[str, Any]) -> bool:
+    return isinstance(chunk.get("error"), dict) and not chunk.get("choices")
+
+
 class InFlightRegistry:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
@@ -465,7 +528,12 @@ async def run_background_response(
     )
     store.update_response(response_id, in_progress)
     try:
-        upstream_response = await upstream.create_completion(prepared.upstream_payload, upstream_token)
+        upstream_response = await create_completion_with_tool_intent_retry(
+            payload=payload,
+            upstream_payload=prepared.upstream_payload,
+            upstream=upstream,
+            upstream_token=upstream_token,
+        )
         response, history_output = build_response_from_upstream(
             payload,
             upstream_response,
@@ -512,6 +580,26 @@ def failed_response(payload: dict[str, Any], response_id: str, error: dict[str, 
         usage=None,
         incomplete_details=None,
         error=error,
+    )
+
+
+def store_failed_stream_response(
+    payload: dict[str, Any],
+    prepared: PreparedChatRequest,
+    response_id: str,
+    store: ConversationStore,
+    error: dict[str, Any],
+) -> None:
+    conversation_key = resolve_conversation_key(payload)
+    if not (payload.get("store", True) or conversation_key):
+        return
+    store.save(
+        response_id,
+        failed_response(payload, response_id, error),
+        prepared.conversation_messages,
+        input_items=prepared.input_items,
+        conversation_key=conversation_key,
+        save_response_id=payload.get("store", True),
     )
 
 

@@ -23,13 +23,41 @@ class UpstreamStreamHandle:
     response: httpx.Response
 
     async def iter_events(self) -> AsyncIterator[str]:
+        event_name = ""
+        data_lines: list[str] = []
+
+        async def flush_event() -> str | None:
+            nonlocal event_name, data_lines
+            if not data_lines:
+                event_name = ""
+                return None
+            payload = "\n".join(data_lines)
+            current_event = event_name
+            event_name = ""
+            data_lines = []
+            if current_event == "error":
+                raise UpstreamHTTPError(502, parse_stream_error_payload(payload))
+            return payload
+
         async for line in self.response.aiter_lines():
             if not line:
+                payload = await flush_event()
+                if payload is not None:
+                    yield payload
                 continue
-            if line.startswith("data: "):
-                yield line[6:]
-            elif line.startswith("data:"):
-                yield line[5:]
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
+                continue
+            if line.startswith("data:"):
+                data = line[5:]
+                if data.startswith(" "):
+                    data = data[1:]
+                data_lines.append(data)
+        payload = await flush_event()
+        if payload is not None:
+            yield payload
 
     async def aclose(self) -> None:
         await self.response.aclose()
@@ -124,3 +152,15 @@ def compose_auth_header_value(prefix: str, token: str) -> str:
     if normalized_prefix.endswith(("=", ":", "/")):
         return f"{normalized_prefix}{token}"
     return f"{normalized_prefix} {token}"
+
+
+def parse_stream_error_payload(payload: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        return {"error": {"message": payload, "type": "upstream_error"}}
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+        return parsed
+    if isinstance(parsed, dict) and "message" in parsed:
+        return {"error": {"message": str(parsed["message"]), "type": "upstream_error"}}
+    return {"error": {"message": json.dumps(parsed, ensure_ascii=False), "type": "upstream_error"}}

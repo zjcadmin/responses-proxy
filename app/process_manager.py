@@ -57,6 +57,7 @@ class ProcessManager:
             "upstream_headers": preset.headers,
             "upstream_api_key_header_name": preset.api_key_header_name,
             "upstream_api_key_prefix": preset.api_key_prefix,
+            "upstream_supports_image_input": preset.supports_image_input,
             "request_timeout_seconds": preset.request_timeout_seconds,
         }
         self.launch_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -143,6 +144,11 @@ class ProcessManager:
             if self._can_connect(host, port):
                 return ProcessStatus(state="running", running=True, pid=pid, host=host, port=port)
             return ProcessStatus(state="starting", running=True, pid=pid, host=host, port=port)
+        listening_pids = self.find_listening_pids(port)
+        if listening_pids and self._can_connect(host, port):
+            return ProcessStatus(state="running", running=True, pid=listening_pids[0], host=host, port=port)
+        if pid:
+            self.clear_pid()
         return ProcessStatus(state="stopped", running=False, pid=None, host=host, port=port)
 
     def record_event(self, message: str) -> None:
@@ -167,6 +173,10 @@ class ProcessManager:
         }
 
     def ensure_port_available(self, host: str, port: int) -> None:
+        listening_pids = self.find_listening_pids(port)
+        if listening_pids:
+            pid_text = ", ".join(str(pid) for pid in listening_pids)
+            raise RuntimeError(f"Port {port} is already in use by PID(s): {pid_text}.")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind((host, port))

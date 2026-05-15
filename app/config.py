@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     upstream_api_key_header_name: str = "Authorization"
     upstream_api_key_prefix: str = "Bearer "
     upstream_supports_image_input: bool = False
+    tool_call_mode: str = "native"
     request_timeout_seconds: float = 120.0
     strict_protocol: bool = False
     state_store_path: str | None = None
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
         stripped = value.strip()
         return stripped or None
 
-    @field_validator("upstream_api_key_header_name", "upstream_api_key_prefix")
+    @field_validator("upstream_api_key_header_name", "upstream_api_key_prefix", "tool_call_mode")
     @classmethod
     def _normalize_header_text(cls, value: str) -> str:
         return value.strip()
@@ -119,6 +120,7 @@ class LaunchConfig(BaseModel):
     upstream_api_key_header_name: str = "Authorization"
     upstream_api_key_prefix: str = "Bearer "
     upstream_supports_image_input: bool = False
+    tool_call_mode: str = "native"
     request_timeout_seconds: float = 120.0
     strict_protocol: bool = False
     state_store_path: str | None = None
@@ -158,7 +160,7 @@ class LaunchConfig(BaseModel):
             raise ValueError("upstream_headers must be a JSON object.")
         return {str(key).strip(): str(header_value).strip() for key, header_value in value.items()}
 
-    @field_validator("upstream_api_key_header_name", "upstream_api_key_prefix")
+    @field_validator("upstream_api_key_header_name", "upstream_api_key_prefix", "tool_call_mode")
     @classmethod
     def _normalize_launch_header_text(cls, value: str) -> str:
         return value.strip()
@@ -202,6 +204,7 @@ class LaunchConfig(BaseModel):
             "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME": self.upstream_api_key_header_name,
             "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX": self.upstream_api_key_prefix,
             "RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT": str(self.upstream_supports_image_input).lower(),
+            "RESPONSES_PROXY_TOOL_CALL_MODE": self.tool_call_mode,
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": str(self.request_timeout_seconds),
             "RESPONSES_PROXY_STRICT_PROTOCOL": str(self.strict_protocol).lower(),
             "RESPONSES_PROXY_STATE_STORE_PATH": self.state_store_path or "",
@@ -236,6 +239,7 @@ def load_synced_model_config_defaults(path: str | Path) -> dict[str, Any]:
         "upstream_api_key_header_name",
         "upstream_api_key_prefix",
         "upstream_supports_image_input",
+        "tool_call_mode",
         "request_timeout_seconds",
         "strict_protocol",
         "state_store_path",

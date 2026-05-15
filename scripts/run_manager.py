@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import socket
 import sys
 
 import uvicorn
@@ -12,6 +13,34 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.manager_store import DEFAULT_MANAGER_PASSWORD, ManagerStore
+
+
+def ensure_port_available(host: str, port: int) -> None:
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        pids: list[int] = []
+        for connection in psutil.net_connections(kind="tcp"):
+            if connection.status != psutil.CONN_LISTEN or connection.pid is None:
+                continue
+            laddr = connection.laddr
+            connection_port = getattr(laddr, "port", None)
+            if connection_port is None and isinstance(laddr, tuple) and len(laddr) >= 2:
+                connection_port = laddr[1]
+            if connection_port == port and int(connection.pid) not in pids:
+                pids.append(int(connection.pid))
+        if pids:
+            raise RuntimeError(f"Port {port} is already in use by PID(s): {', '.join(str(pid) for pid in pids)}.")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError as exc:
+        raise RuntimeError(f"Port {port} on {host} is already in use.") from exc
+    finally:
+        sock.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +80,12 @@ def main() -> int:
         project_root=data_root,
     )
     state = store.load_state()
+
+    try:
+        ensure_port_available(state.manager.manager_host, state.manager.manager_port)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 1
 
     print(f"Starting manager on http://{state.manager.manager_host}:{state.manager.manager_port}", flush=True)
     print("Manager request logs are enabled. Open the web UI to see GET/POST lines here.", flush=True)

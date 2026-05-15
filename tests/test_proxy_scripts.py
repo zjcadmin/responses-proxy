@@ -19,7 +19,7 @@ def test_ensure_port_available_rejects_occupied_port() -> None:
     sock.listen()
 
     try:
-        with pytest.raises(RuntimeError, match=f"Port {port} on {host} is already in use"):
+        with pytest.raises(RuntimeError, match=rf"Port {port} .*already in use"):
             run_proxy.ensure_port_available(host, port)
     finally:
         sock.close()
@@ -141,6 +141,7 @@ def test_run_manager_uses_pyinstaller_safe_uvicorn_logging(monkeypatch, tmp_path
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(run_manager.uvicorn, "run", fake_run)
+    monkeypatch.setattr(run_manager, "ensure_port_available", lambda host, port: None)
     monkeypatch.setattr(sys, "argv", ["run_manager.py", "--data-dir", str(tmp_path)])
 
     assert run_manager.main() == 0
@@ -185,6 +186,8 @@ def test_docker_assets_define_manager_service_and_persistent_volumes() -> None:
 
     assert "FROM python:3.12-slim" in dockerfile
     assert "scripts/run_manager.py" in dockerfile
+    assert "HEALTHCHECK" in dockerfile
+    assert "127.0.0.1:8899/healthz" in dockerfile
     assert "8899:8899" in compose
     assert "8800:8800" in compose
     assert "./data:/data" in compose

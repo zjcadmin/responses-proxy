@@ -6,6 +6,8 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 import app.process_manager as process_manager_module
 from app.manager_config import ModelPreset
 from app.process_manager import ProcessManager
@@ -22,6 +24,7 @@ def test_write_launch_config_snapshot(tmp_path: Path) -> None:
     assert payload["proxy_port"] == preset.proxy_port
     assert payload["upstream_headers"] == preset.headers
     assert payload["proxy_api_key"] == "proxy-key"
+    assert payload["upstream_supports_image_input"] is True
 
 
 def test_stop_by_pid_file_returns_stopped_state(tmp_path: Path) -> None:
@@ -94,6 +97,29 @@ def test_find_listening_pids_uses_cross_platform_psutil(monkeypatch, tmp_path: P
     assert manager.find_listening_pids(8800) == [1111, 2222]
 
 
+def test_ensure_port_available_rejects_any_listener_on_same_port(monkeypatch, tmp_path: Path) -> None:
+    manager = ProcessManager(project_root=tmp_path, python_executable=Path(sys.executable))
+    monkeypatch.setattr(manager, "find_listening_pids", lambda port: [1111, 2222])
+
+    with pytest.raises(RuntimeError) as exc:
+        manager.ensure_port_available("0.0.0.0", 8800)
+
+    assert "PID(s): 1111, 2222" in str(exc.value)
+
+
+def test_status_recovers_from_stale_pid_file_by_port_lookup(monkeypatch, tmp_path: Path) -> None:
+    manager = ProcessManager(project_root=tmp_path, python_executable=Path(sys.executable))
+    manager.write_pid(9999)
+    monkeypatch.setattr(manager, "is_pid_running", lambda pid: False)
+    monkeypatch.setattr(manager, "find_listening_pids", lambda port: [2222])
+    monkeypatch.setattr(manager, "_can_connect", lambda host, port: True)
+
+    status = manager.status(host="127.0.0.1", port=8800)
+
+    assert status.running is True
+    assert status.pid == 2222
+
+
 def _build_preset() -> ModelPreset:
     return ModelPreset(
         id="preset_1",
@@ -110,5 +136,6 @@ def _build_preset() -> ModelPreset:
         description="",
         api_key_header_name="Authorization",
         api_key_prefix="Bearer ",
+        supports_image_input=True,
         is_active=True,
     )

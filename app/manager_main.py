@@ -127,6 +127,10 @@ def create_manager_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok", "service": "Responses Proxy Manager"}
+
     @app.post("/api/auth/login")
     async def login(payload: LoginPayload, response: Response) -> dict[str, Any]:
         current = manager_store.load_state().manager

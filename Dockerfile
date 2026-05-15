@@ -19,4 +19,7 @@ RUN mkdir -p /data/runtime
 
 EXPOSE 8899 8800
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/healthz', timeout=3).read()"
+
 CMD ["python", "scripts/run_manager.py"]

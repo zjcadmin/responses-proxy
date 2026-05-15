@@ -129,13 +129,20 @@ def test_manager_index_serves_html(client: TestClient) -> None:
     assert "manager-root" in response.text
 
 
-def test_manager_assets_are_cache_busted_and_expose_hosted_tool_settings(client: TestClient) -> None:
-    response = client.get("/")
-    script = client.get("/static/app.js?v=20260510-vision-script")
+def test_manager_healthz_does_not_require_login(client: TestClient) -> None:
+    response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert "/static/styles.css?v=20260510-vision-script" in response.text
-    assert "/static/app.js?v=20260510-vision-script" in response.text
+    assert response.json() == {"status": "ok", "service": "Responses Proxy Manager"}
+
+
+def test_manager_assets_are_cache_busted_and_expose_hosted_tool_settings(client: TestClient) -> None:
+    response = client.get("/")
+    script = client.get("/static/app.js?v=20260511-density-75")
+
+    assert response.status_code == 200
+    assert "/static/styles.css?v=20260511-density-75" in response.text
+    assert "/static/app.js?v=20260511-density-75" in response.text
     assert script.status_code == 200
     assert 'data-page="settings"' in script.text
     assert "manager_port" in script.text

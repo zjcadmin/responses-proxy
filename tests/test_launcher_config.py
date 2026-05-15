@@ -52,6 +52,7 @@ def test_launch_config_can_be_mapped_to_environment_variables() -> None:
             "RESPONSES_PROXY_UPSTREAM_API_KEY_HEADER_NAME": "Authorization",
             "RESPONSES_PROXY_UPSTREAM_API_KEY_PREFIX": "Bearer ",
             "RESPONSES_PROXY_UPSTREAM_SUPPORTS_IMAGE_INPUT": "false",
+            "RESPONSES_PROXY_TOOL_CALL_MODE": "native",
             "RESPONSES_PROXY_REQUEST_TIMEOUT_SECONDS": "120.0",
             "RESPONSES_PROXY_STRICT_PROTOCOL": "false",
             "RESPONSES_PROXY_STATE_STORE_PATH": "",

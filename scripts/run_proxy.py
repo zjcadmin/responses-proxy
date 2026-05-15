@@ -16,6 +16,24 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.config import LaunchConfig, load_launch_config
 
 
+def listening_pids_for_port(port: int) -> list[int]:
+    try:
+        import psutil
+    except Exception:
+        return []
+    pids: list[int] = []
+    for connection in psutil.net_connections(kind="tcp"):
+        if connection.status != psutil.CONN_LISTEN or connection.pid is None:
+            continue
+        laddr = connection.laddr
+        connection_port = getattr(laddr, "port", None)
+        if connection_port is None and isinstance(laddr, tuple) and len(laddr) >= 2:
+            connection_port = laddr[1]
+        if connection_port == port and int(connection.pid) not in pids:
+            pids.append(int(connection.pid))
+    return pids
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start the responses proxy from a model config file.")
     parser.add_argument(
@@ -64,6 +82,12 @@ def mask_secret(value: object) -> str:
 
 
 def ensure_port_available(host: str, port: int) -> None:
+    pids = listening_pids_for_port(port)
+    if pids:
+        raise RuntimeError(
+            f"Port {port} is already in use by PID(s): {', '.join(str(pid) for pid in pids)}. "
+            "Close the existing proxy first with stop-proxy.bat."
+        )
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind((host, port))
